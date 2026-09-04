@@ -288,12 +288,40 @@
             el.hiresTag.style.display = stats.hiRes ? 'inline' : 'none';
         },
 
+        ensureStyles: () => {
+            if (document.getElementById('bili-buffer-badge-style')) return;
+            const style = document.createElement('style');
+            style.id = 'bili-buffer-badge-style';
+            style.textContent = `
+                #bili-buffer-badge {
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    height: 22px !important;
+                    width: auto !important;
+                    padding: 0 4px !important;
+                    margin: 0 2px !important;
+                    box-sizing: border-box !important;
+                    cursor: pointer;
+                    user-select: none;
+                    vertical-align: top !important;
+                }
+                .bpx-player-container[data-screen="full"] #bili-buffer-badge,
+                .bpx-player-container[data-screen="web"] #bili-buffer-badge {
+                    height: 32px !important;
+                }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+        },
+
         // 2. 播放器控制栏常驻微标 (无需右键展开即可常驻查看)
         updateControlBarBadge: (stats) => {
             if (!CONFIG.SHOW_CONTROL_BAR_BADGE) return;
 
             const ctrlLeft = document.querySelector('.bpx-player-control-bottom-left');
             if (!ctrlLeft) return;
+
+            UIManager.ensureStyles();
 
             let badge = document.getElementById('bili-buffer-badge');
             if (!badge || !ctrlLeft.contains(badge)) {
@@ -303,7 +331,6 @@
                 badge = document.createElement('div');
                 badge.id = 'bili-buffer-badge';
                 badge.className = 'bpx-player-ctrl-btn';
-                badge.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; height:100% !important; width:auto !important; padding:0 4px; margin:0 2px; cursor:pointer; user-select:none; font-size:11px; font-family:inherit; box-sizing:border-box; vertical-align:middle;';
                 badge.innerHTML = '<span id="bili-buffer-badge-text" style="display:inline-flex; align-items:center; justify-content:center; color:#00aeec; font-weight:bold; background:rgba(0,174,236,0.12); border:1px solid rgba(0,174,236,0.3); border-radius:4px; padding:1px 5px; line-height:16px; box-sizing:border-box; white-space:nowrap;">⚡0s</span>';
                 ctrlLeft.appendChild(badge);
                 UIManager.badgeRef = badge;
