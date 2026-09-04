@@ -1,18 +1,30 @@
 # Bilibili Buffer Unlocker (B站缓冲解限)
 
-[![Greasy Fork](https://img.shields.io/badge/GreasyFork-v3.0-red?logo=tampermonkey)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
+[![Version](https://img.shields.io/badge/Release-v3.0-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#安装指南)
+[![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#-安装指南--installation)
 
 > **突破 B 站 Web 端播放器缓冲时长限制，智能按码率计算安全内存，杜绝浏览器 GC 内存溢出与反复重设循环，提供双重原生 UI 状态监控。**
 
 ---
 
+> [!NOTE]
+> ### 📌 项目渊源与 Fork 持续维护说明 (Lineage & Fork Notice)
+> 本项目 **Fork 自 Greasy Fork 上的开源用户脚本 [Bilibili Buffer Unlocker(B站缓冲解限)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)**，原始创作者为 [**\7.**](https://greasyfork.org/zh-CN/users/1507253-7)（在 Greasy Fork 上发布了 v1.0 至 v2.2 版本）。
+> 
+> 由于上游原版脚本后续停更，本项目在此基础上建立独立仓库进行**持续演进与深度现代化重构**。自 **v3.0** 起，所有关键 Bug 修复（离散区间计算错误、只读解耦等）、Chromium MSE 内存防爆机制升级、无损 DOM 引擎以及双 UI 控制栏集成均由本仓库（[`liweichen6/Bilibili-Buffer-Unlocker`](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)）独立维护并继续开发。
+> 
+> 衷心感谢原作者 `\7.` 早期开拓性的设计灵感与代码贡献！
+
+---
+
 ## 📖 简介 / Overview
 
-默认情况下，哔哩哔哩（Bilibili）Web 端播放器（基于 Dash.js / flv.js 的定制内核）对视频前向缓冲做了极其严格的节流控制，通常仅预载 **20 ~ 30 秒**（`core.getStableBufferTime() = 20`）。在网络环境波动、跨国/海外访问、高码率 4K 播放或频繁快进时，极易造成卡顿和转圈。
+默认情况下，哔哩哔哩（Bilibili）Web 端播放器（基于 Dash.js / flv.js 的定制内核）对视频前向缓冲做了极其严格的节流控制，通常仅预载 **20 ~ 30 秒**（`core.getStableBufferTime() = 20`）。在网络环境波动、跨国/海外访问、高码率 4K 播放或频繁快进时，极易造成卡顿和频繁转圈。
 
-**Bilibili Buffer Unlocker** 深入拦截并接管 B 站播放器底层流媒体引擎 (`window.player.__core()`)，将前向缓冲上限从默认 20 秒提升至最高 **300 秒（5 分钟）**。同时内置智能防爆流控引擎，根据视频码率动态自适应调整缓冲目标，彻底避免触发 Chromium 浏览器的强制 GC 驱逐陷阱。
+**Bilibili Buffer Unlocker** 深入拦截并接管 B 站播放器底层流媒体引擎 (`window.player.__core()`)，将前向缓冲上限从官方默认 20 秒提升至最高 **300 秒（5 分钟）**。同时内置智能防爆流控引擎，根据视频码率动态自适应调整缓冲目标，彻底避免触发 Chromium 浏览器的强制 GC 驱逐陷阱。
 
 ---
 
@@ -121,7 +133,9 @@ const CONFIG = {
 
 ## 📝 版本更新历史 / Changelog
 
-### v3.0 (2026-09) - *里程碑版本：重构、性能飞跃与双 UI 架构*
+### 🚀 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
+
+#### v3.0 (2026-09) - *里程碑版本：全面重构、性能飞跃与双 UI 架构*
 - 🐞 **修复离散缓冲区间计算 Bug**：改用精确的范围匹配算法 (`start - 0.25 <= currentTime <= end`)，彻底解决回拖进度条后 `video.buffered` 报告虚高缓冲的严重缺陷。
 - ⚡ **分离查询与修改副作用**：将 `getStats()` 转为纯粹的只读查询函数，杜绝每秒 UI 刷新时对播放器内核的重复写入。
 - ⚖️ **重构防抖死区（Hysteresis Deadband）**：严谨限定 $\ge 5\text{s}$ 或保底值才下发配置，消除了码率微波动导致的内核配置频繁抖动。
@@ -132,35 +146,45 @@ const CONFIG = {
 - ⚡ **全新功能：播放器控制栏常驻微标**：无需右键打开统计面板，直接在播放器底栏常驻显示轻量状态标（`⚡[时长]`），带悬浮信息提示。
 - 🎬 **生命周期事件驱动**：绑定 `<video>` 的 `loadedmetadata`、`play`、`ratechange`，切 P、切清晰度无需等待定时器，毫秒级响应。
 
-### v2.2 (2026-03-20)
+---
+
+### 📦 Greasy Fork 原版历史归档 (Original by \7.)
+
+#### v2.2 (2026-03-20)
 - 🎵 适配 Hi-Res 视频：检测到 FLAC / 杜比全景声等高规格音频流时保持 B 站默认策略免干预，保障特殊音轨平稳解码。
 
-### v2.1 (2026-01-25)
+#### v2.1 (2026-01-25)
 - 🎨 修正 UI 统计面板中的缓冲区时长与缓存上限显示。
 
-### v2.0 (2026-01-21)
+#### v2.0 (2026-01-21)
 - 🛡️ **鲁棒性增强**：加入守护机制，解决自动换集或清晰度切换后配置失效的问题。
 - 🧠 **智能限流初版**：引入码率与内存占用估算，解决高画质下因浏览器内存溢出导致的“缓冲消失”与“反复重缓冲”。
 - 🎨 UI 展示优化。
 
-### v1.0 ~ v1.3 (2025-08-21)
+#### v1.0 ~ v1.3 (2025-08-21)
 - 初始版本发布：突破 B 站播放器缓冲长度限制，在播放器右键统计信息中集成缓冲指标展示。
 
 ---
 
 ## 📥 安装指南 / Installation
 
+### 途径一：本仓库持续维护版（v3.0+ 推荐）
+
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
-2. 安装脚本：
-   - 访问 **[Greasy Fork 脚本主页](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)** 点击「安装此脚本」。
-   - 或直接下载本仓库中的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
-3. 打开任意 B站视频（如 `https://www.bilibili.com/video/BV...`），即可自动生效。
+2. 点击下方链接一键安装最新重构版：
+   - 👉 **[安装 v3.0+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
+
+### 途径二：Greasy Fork 原版（v2.2 基础归档）
+
+- 可前往上游原版主页查看：[Greasy Fork 脚本主页 (v2.2)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
 
 ---
 
 ## 📜 许可证 / License
 
 本项目基于 [MIT License](LICENSE) 开源发布。
+原版代码版权归原作者 `\7.` 所有；v3.0+ 演进维护由 `liweichen6` 持续推进。

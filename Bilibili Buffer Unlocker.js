@@ -2,19 +2,21 @@
 // @name         Bilibili Buffer Unlocker(B站缓冲解限)
 // @name:zh      B站缓冲解限
 // @name:en      Bilibili Buffer Unlocker
-// @namespace    http://tampermonkey.net/
+// @namespace    https://github.com/liweichen6/Bilibili-Buffer-Unlocker
 // @version      3.0
 // @description  Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI. 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:zh 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:en Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI
-// @author       \7. with Gemini
+// @author       \7. (Original Author), liweichen6 with Gemini (v3.0+ Ongoing Development)
+// @homepageURL  https://github.com/liweichen6/Bilibili-Buffer-Unlocker
+// @supportURL   https://github.com/liweichen6/Bilibili-Buffer-Unlocker/issues
 // @match        *://*.bilibili.com/*
 // @match        *://bilibili.com/*
 // @grant        none
 // @run-at       document-end
 // @license      MIT
-// @downloadURL  https://update.greasyfork.org/scripts/546615/Bilibili%20Buffer%20Unlocker%28B%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90%29.user.js
-// @updateURL    https://update.greasyfork.org/scripts/546615/Bilibili%20Buffer%20Unlocker%28B%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90%29.meta.js
+// @downloadURL  https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js
+// @updateURL    https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js
 // ==/UserScript==
 
 (function () {
