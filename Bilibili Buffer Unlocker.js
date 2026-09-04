@@ -304,11 +304,38 @@
                     box-sizing: border-box !important;
                     cursor: pointer;
                     user-select: none;
-                    vertical-align: top !important;
+                    vertical-align: middle !important;
                 }
                 .bpx-player-container[data-screen="full"] #bili-buffer-badge,
                 .bpx-player-container[data-screen="web"] #bili-buffer-badge {
                     height: 32px !important;
+                }
+                #bili-buffer-badge-text {
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    font-size: 11px !important;
+                    font-weight: bold;
+                    font-family: inherit;
+                    line-height: 16px;
+                    color: #00aeec;
+                    background: rgba(0, 174, 236, 0.12);
+                    border: 1px solid rgba(0, 174, 236, 0.3);
+                    border-radius: 4px;
+                    padding: 1px 5px;
+                    box-sizing: border-box;
+                    white-space: nowrap;
+                    transition: background 0.2s, border-color 0.2s;
+                }
+                #bili-buffer-badge:hover #bili-buffer-badge-text {
+                    background: rgba(0, 174, 236, 0.22);
+                    border-color: rgba(0, 174, 236, 0.55);
+                }
+                .bpx-player-container[data-screen="full"] #bili-buffer-badge-text,
+                .bpx-player-container[data-screen="web"] #bili-buffer-badge-text {
+                    font-size: 12px !important;
+                    padding: 2px 7px;
+                    line-height: 20px;
                 }
             `;
             (document.head || document.documentElement).appendChild(style);
@@ -331,7 +358,7 @@
                 badge = document.createElement('div');
                 badge.id = 'bili-buffer-badge';
                 badge.className = 'bpx-player-ctrl-btn';
-                badge.innerHTML = '<span id="bili-buffer-badge-text" style="display:inline-flex; align-items:center; justify-content:center; color:#00aeec; font-weight:bold; background:rgba(0,174,236,0.12); border:1px solid rgba(0,174,236,0.3); border-radius:4px; padding:1px 5px; line-height:16px; box-sizing:border-box; white-space:nowrap;">⚡0s</span>';
+                badge.innerHTML = '<span id="bili-buffer-badge-text">⚡0s</span>';
                 ctrlLeft.appendChild(badge);
                 UIManager.badgeRef = badge;
             }
