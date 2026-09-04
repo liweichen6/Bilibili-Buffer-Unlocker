@@ -3,7 +3,7 @@
 // @name:zh      B站缓冲解限
 // @name:en      Bilibili Buffer Unlocker
 // @namespace    https://github.com/liweichen6/Bilibili-Buffer-Unlocker
-// @version      3.0
+// @version      3.1
 // @description  Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI. 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:zh 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:en Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI
@@ -36,7 +36,7 @@
     const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
     const Utils = {
-        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.0',
+        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.1',
 
         formatTime: (s) => {
             if (!Number.isFinite(s) || s < 0) return '0s';

@@ -2,7 +2,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
-[![Version](https://img.shields.io/badge/Release-v3.0-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Version](https://img.shields.io/badge/Release-v3.1-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#-安装指南--installation)
 
@@ -135,6 +135,11 @@ const CONFIG = {
 
 ### 🚀 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
 
+#### v3.1 (2026-09)
+- 🎨 **控制栏微标全场景像素级居中对齐**：全面适配普通窗口、网页全屏与全屏模式，精准锚定原生 32px 视觉基准线（与播放键、时间标签实现 0 像素垂直偏差）。
+- 🔤 **修复微标文字塌陷隐形 Bug**：显式指定文字大小与行高，彻底规避 B 站原生 `.bpx-player-ctrl-btn` 规则中 `font-size: 0px` 导致的文字宽高归零缺陷。
+- ✨ **增强交互动效**：增加微标悬浮（Hover）高亮渐变过渡，完美融入原生播放器控制栏交互质感。
+
 #### v3.0 (2026-09) - *里程碑版本：全面重构、性能飞跃与双 UI 架构*
 - 🐞 **修复离散缓冲区间计算 Bug**：改用精确的范围匹配算法 (`start - 0.25 <= currentTime <= end`)，彻底解决回拖进度条后 `video.buffered` 报告虚高缓冲的严重缺陷。
 - ⚡ **分离查询与修改副作用**：将 `getStats()` 转为纯粹的只读查询函数，杜绝每秒 UI 刷新时对播放器内核的重复写入。
@@ -168,14 +173,14 @@ const CONFIG = {
 
 ## 📥 安装指南 / Installation
 
-### 途径一：本仓库持续维护版（v3.0+ 推荐）
+### 途径一：本仓库持续维护版（v3.1+ 推荐）
 
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
 2. 点击下方链接一键安装最新重构版：
-   - 👉 **[安装 v3.0+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - 👉 **[安装 v3.1+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
    - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
 
 ### 途径二：Greasy Fork 原版（v2.2 基础归档）
