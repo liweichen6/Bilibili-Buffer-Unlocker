@@ -296,12 +296,15 @@
             if (!ctrlLeft) return;
 
             let badge = document.getElementById('bili-buffer-badge');
-            if (!badge) {
+            if (!badge || !ctrlLeft.contains(badge)) {
+                if (badge && badge.parentNode) {
+                    badge.parentNode.removeChild(badge);
+                }
                 badge = document.createElement('div');
                 badge.id = 'bili-buffer-badge';
                 badge.className = 'bpx-player-ctrl-btn';
-                badge.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; padding:0 6px; cursor:pointer; user-select:none; font-size:11px; font-family:inherit; vertical-align:middle;';
-                badge.innerHTML = '<span id="bili-buffer-badge-text" style="color:#00aeec; font-weight:bold; background:rgba(0,174,236,0.12); border:1px solid rgba(0,174,236,0.3); border-radius:4px; padding:1px 5px; line-height:16px;">⚡0s</span>';
+                badge.style.cssText = 'display:inline-flex; align-items:center; justify-content:center; height:100% !important; width:auto !important; padding:0 4px; margin:0 2px; cursor:pointer; user-select:none; font-size:11px; font-family:inherit; box-sizing:border-box; vertical-align:middle;';
+                badge.innerHTML = '<span id="bili-buffer-badge-text" style="display:inline-flex; align-items:center; justify-content:center; color:#00aeec; font-weight:bold; background:rgba(0,174,236,0.12); border:1px solid rgba(0,174,236,0.3); border-radius:4px; padding:1px 5px; line-height:16px; box-sizing:border-box; white-space:nowrap;">⚡0s</span>';
                 ctrlLeft.appendChild(badge);
                 UIManager.badgeRef = badge;
             }
