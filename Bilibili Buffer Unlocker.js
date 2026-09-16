@@ -25,11 +25,11 @@
 
     // === 配置区域 ===
     const CONFIG = {
-        MIN_TIME_LIMIT: 15,                 // 最低缓冲时间下限 (秒)
-        MAX_TIME_LIMIT: 300,                // 缓冲时间上限 300秒 (5分钟)
-        SAFE_BYTE_LIMIT: 140 * 1024 * 1024, // 综合安全内存空间上限 140MB (展示基准)
-        SAFE_VIDEO_BYTE_LIMIT: 130 * 1024 * 1024, // 视频安全内存上限 130 MiB (Chromium硬限制 150 MiB)
-        SAFE_AUDIO_BYTE_LIMIT: 10 * 1024 * 1024,  // 音频安全内存上限 10 MiB (Chromium硬限制 12 MiB)
+        MIN_TIME_LIMIT: 20,                 // 最低缓冲时间下限 (秒)
+        MAX_TIME_LIMIT: 600,                // 缓冲时间上限 600秒 (10分钟)
+        SAFE_BYTE_LIMIT: 120 * 1024 * 1024, // 综合安全内存空间上限 120MB (展示基准)
+        SAFE_VIDEO_BYTE_LIMIT: 110 * 1024 * 1024, // 视频安全内存上限 110 MiB (Chromium硬限制 150 MiB)
+        SAFE_AUDIO_BYTE_LIMIT: 8 * 1024 * 1024,   // 音频安全内存上限 8 MiB (Chromium硬限制 12 MiB)
         CHECK_INTERVAL: 3000,               // 内核优化轮询间隔 (毫秒)
         UI_REFRESH_RATE: 1000,              // UI 刷新间隔 (毫秒)
         HYSTERESIS_DELTA: 5,                // 缓冲目标调整容差 (秒，防频繁抖动)

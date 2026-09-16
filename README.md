@@ -108,13 +108,13 @@ $$\text{Chromium 硬顶 162 MB} - \text{脚本预设 120 MB} = \mathbf{42\text{ 
 - **视频单轨溢出**：高动态 4K/8K 视频轨若抢占绝大部分配额，单 GOP 脉冲可能直接突破 **150 MiB 视频硬顶**。
 
 v3.2 引入 **音视频独立双配额隔离预算**：
-$$\text{safeVideoSec} = \frac{\text{SAFE\_VIDEO\_BYTE\_LIMIT (110 MiB)}}{\text{videoBps}},\quad \text{safeAudioSec} = \frac{\text{SAFE\_AUDIO\_BYTE\_LIMIT (10 MiB)}}{\text{audioBps}}$$
-$$\text{safeSeconds} = \max\left(15,\; \min(\text{safeAudioSec},\; \text{safeVideoSec},\; 300)\right)$$
+$$\text{safeVideoSec} = \frac{\text{SAFE\_VIDEO\_BYTE\_LIMIT (110 MiB)}}{\text{videoBps}},\quad \text{safeAudioSec} = \frac{\text{SAFE\_AUDIO\_BYTE\_LIMIT (8 MiB)}}{\text{audioBps}}$$
+$$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVideoSec},\; 600)\right)$$
 
 双轨各自按码率计算可缓冲秒数并严格取**交集下限**，在数学上绝对保证了：
 1. **视频轨内存消耗** $\le 110\text{ MiB}$（低于 Chromium 150 MiB 硬顶，预留 40 MiB 安全余量）；
-2. **音频轨内存消耗** $\le 10\text{ MiB}$（低于 Chromium 12 MiB 硬顶，预留 2 MiB 安全余量）；
-3. **综合内存消耗** $\le 120\text{ MiB}$（低于 162 MB 合计硬顶，预留 42 MB 安全余量）。
+2. **音频轨内存消耗** $\le 8\text{ MiB}$（低于 Chromium 12 MiB 硬顶，预留 4 MiB 安全余量）；
+3. **综合内存消耗** $\le 118\text{ MiB}$（低于 162 MB 合计硬顶，预留 44 MB 安全余量）。
 
 ---
 
@@ -124,11 +124,11 @@ $$\text{safeSeconds} = \max\left(15,\; \min(\text{safeAudioSec},\; \text{safeVid
 
 ```javascript
 const CONFIG = {
-    MIN_TIME_LIMIT: 15,                 // 最低缓冲时间下限 (秒)
-    MAX_TIME_LIMIT: 300,                // 缓冲时间上限 300秒 (5分钟)
+    MIN_TIME_LIMIT: 20,                 // 最低缓冲时间下限 (秒)
+    MAX_TIME_LIMIT: 600,                // 缓冲时间上限 600秒 (10分钟)
     SAFE_BYTE_LIMIT: 120 * 1024 * 1024, // 综合安全内存空间上限 120MB (展示基准)
     SAFE_VIDEO_BYTE_LIMIT: 110 * 1024 * 1024, // 视频安全内存上限 110 MiB (Chromium硬限制 150 MiB)
-    SAFE_AUDIO_BYTE_LIMIT: 10 * 1024 * 1024,  // 音频安全内存上限 10 MiB (Chromium硬限制 12 MiB)
+    SAFE_AUDIO_BYTE_LIMIT: 8 * 1024 * 1024,   // 音频安全内存上限 8 MiB (Chromium硬限制 12 MiB)
     CHECK_INTERVAL: 3000,               // 内核优化轮询间隔 (毫秒)
     UI_REFRESH_RATE: 1000,              // UI 刷新间隔 (毫秒)
     HYSTERESIS_DELTA: 5,                // 缓冲目标调整容差 (秒，防频繁抖动)
