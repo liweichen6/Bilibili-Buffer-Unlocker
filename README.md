@@ -2,11 +2,11 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
-[![Version](https://img.shields.io/badge/Release-v3.2-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Version](https://img.shields.io/badge/Release-v3.3--beta-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#-安装指南--installation)
 
-> **突破 B 站 Web 端播放器缓冲时长限制，智能按码率计算安全内存，杜绝浏览器 GC 内存溢出与反复重设循环，提供双重原生 UI 状态监控。**
+> **突破 B 站 Web 端播放器缓冲时长限制，实测 MSE 分片物理内存与闭环防爆调控，智能按码率计算安全内存，杜绝浏览器 GC 内存溢出与反复重设循环，提供双重原生 UI 状态监控。**
 
 ---
 
@@ -24,31 +24,40 @@
 
 默认情况下，哔哩哔哩（Bilibili）Web 端播放器（基于 Dash.js / flv.js 的定制内核）对视频前向缓冲做了极其严格的节流控制，通常仅预载 **20 ~ 30 秒**（`core.getStableBufferTime() = 20`）。在网络环境波动、跨国/海外访问、高码率 4K 播放或频繁快进时，极易造成卡顿和频繁转圈。
 
-**Bilibili Buffer Unlocker** 深入拦截并接管 B 站播放器底层流媒体引擎 (`window.player.__core()`)，将前向缓冲上限从官方默认 20 秒提升至最高 **300 秒（5 分钟）**。同时内置智能防爆流控引擎，根据视频码率动态自适应调整缓冲目标，彻底避免触发 Chromium 浏览器的强制 GC 驱逐陷阱。
+**Bilibili Buffer Unlocker** 深入拦截并接管 B 站播放器底层流媒体引擎 (`window.player.__core()`)，将前向缓冲上限从官方默认 20 秒提升至最高 **600 秒（10 分钟）**。同时内置底层 MSE 实时分片追踪引擎与闭环物理内存调控，根据实时测算码率与真实物理占用动态自适应调整缓冲目标，彻底避免触发 Chromium 浏览器的强制 GC 驱逐陷阱。
 
 ---
 
 ## ✨ 核心特性 / Features
 
-- 🚀 **突破时长限制**：默认缓冲时长由官方 20s 提升至 **300s（5 分钟）**，网络不稳定或高倍速播放时平滑无阻。
+- 🚀 **突破时长限制**：默认缓冲时长由官方 20s 提升至 **600s（10 分钟）**，网络不稳定或高倍速播放时平滑无阻。
+- 📦 **实时 MSE 分片追踪引擎 (Real-Time Chunk Tracking)**：
+  - 底层拦截 `MediaSource.prototype.addSourceBuffer`、`SourceBuffer.prototype.appendBuffer` 与 `SourceBuffer.prototype.remove`；
+  - 毫秒级提取真实分片字节大小（`data.byteLength`）、呈现时间戳区间 $[start, end]$ 与片段时长 $\Delta t$；
+  - 维护内存物理分片账本，动态计算当前播放点向前连续缓冲的**真实物理内存占用**与滑动窗口移动平均码率（Rolling Bitrate）。
+- 🧠 **闭环自适应流控与音视频双轨物理防爆 (Closed-Loop Memory Budgeting)**：
+  - 码率浪涌自适应对齐：$\text{effectiveVideoBps} = \max(\text{manifestRate},\; \text{rollingRate})$，实时捕获 3D 游戏（如 `BV1oZeA6fERD`）、特效爆炸等极端 VBR 峰值；
+  - 音视频双轨 90% 物理内存防爆熔断：分别实时监控视频（110 MiB）与音频（8 MiB）实测物理载荷，任一轨道逼近 90%（99 MiB / 7.2 MiB）即自适应收窄缓冲目标至当前缓冲量，停止新分片请求，彻底杜绝冲破 Chromium 150 MiB 视频与 12 MiB 音频阈值引发的 GC 驱逐与重缓冲崩溃；
+  - 采样抗抖与平滑降级：滑动窗口设置 1.0s 最小有效采样门槛，滤除单关键帧产生的瞬时虚高噪点；冷启动未收集到分片时无缝回退至静态清单双配额模型；首屏分片安全持久化，仅在切集换源时触发物理账本重置。
 - 🛡️ **双配额动态安全内存上限（智能限流）**：
   - 自动从播放器元数据独立提取音视频码率 (`mediaInfo.videoDataRate` 与 `mediaInfo.audioDataRate`)。
-  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **110 MiB**（硬限制 150 MiB），音频轨安全上限 **10 MiB**（硬限制 12 MiB），双轨取交集保底，杜绝单轨内存溢出与 GC 驱逐。
+  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **110 MiB**（硬限制 150 MiB），音频轨安全上限 **8 MiB**（硬限制 12 MiB），双轨取交集保底，杜绝单轨内存溢出与 GC 驱逐。
 - 🔬 **真·连续缓冲计算（Range-Containment）**：
   - 准确遍历 `HTMLMediaElement.buffered` 的离散区间，智能聚合微小缝隙（$\le 0.25\text{s}$）的连续分片，精准匹配当前进度点。
   - 彻底解决用户回拖进度条（Seek）或分段拉流时缓冲区虚标与假死问题。
-- ⚡ **事件驱动即时响应**：
-  - 启动时立即绑定视频事件，监听 `<video>` 元素的 `loadedmetadata`、`play`、`ratechange`，在换 P、换集、切换清晰度时 **300ms 内即刻生效**。
+- ⚡ **事件驱动即时响应与早启动拦截**：
+  - 脚本声明 `@run-at document-start`，在播放器 Dash 内核加载前即注入底层原型钩子，100% 捕获完整分片流；
+  - 绑定 `<video>` 元素的 `loadedmetadata`、`play`、`ratechange`，在换 P、换集、切换清晰度时 **300ms 内即刻生效**。
 - 🎵 **Hi-Res / 杜比全景声特殊流自适应与状态重置**：
   - 自动识别 FLAC、EC-3、EAC3、AC-3、AC3、AC-4、Dolby 以及 B 站音质 ID `30250`（杜比全景声）、`30251`（Hi-Res）。
   - 当切入高规格音频时，若播放器处于前序视频的扩容高位（$>30\text{s}$），主动安全重置为官方默认 $20\text{s}$，彻底杜绝内核复用导致的音频溢出。
-- 📊 **双重 UI 深度集成与交互增强**：
-  - **播放器控制栏常驻微标**：在左下角播放控制条常驻显示 `⚡[缓冲时长]` 微标，悬停即可查看详细指标，支持点击事件隔离与一键手动重触发解限，文字节点常驻缓存。
+- 📊 **双重 UI 深度集成与物理实测展示**：
+  - **播放器控制栏常驻微标**：在左下角播放控制条常驻显示 `⚡[缓冲时长]` 微标，悬停即可查看详细指标与物理实测大小，支持点击事件隔离与一键手动重触发解限，文字节点常驻缓存。
   - **全屏幕模式对齐**：完美适配普通窗口、宽屏模式（`data-screen="wide"`）、网页全屏与全屏模式的 32px 视觉基准线。
-  - **原生统计面板扩展**：右键打开播放器「实时统计信息」，无缝嵌入专属缓冲健康度监控条，修复 DOM 节点可能重复创建的隐患。
+  - **原生统计面板扩展**：右键打开播放器「实时统计信息」，无缝嵌入专属缓冲健康度监控条，物理内存测量带专属绿色 `实测` 标识。
 - 🔋 **零 DOM 损耗与防抖死区**：
   - 统计窗口关闭时自动跳过 DOM 渲染计算；
-  - 增加 `currentSetting !== targetSeconds` 守卫与 $\ge 5\text{s}$ 容差死区（Hysteresis Deadband），彻底规避 4K/8K 等极端高码率下每 3 秒重复写入内核的开销。
+  - 增加 `currentSetting !== targetSeconds` 守卫与 $\ge 5\text{s}$ 容差死区（Hysteresis Deadband），闭环防御性下调时毫秒级响应，常规波动消除每 3 秒重复写入内核的开销。
 - 🛡️ **沙箱穿透与无害隔离**：
   - 元数据显式声明 `@grant unsafeWindow` 确保 Manifest V3 环境稳定运行，引入 `@noframes` 规避广告及评论区 iframe 内无效执行。
 
@@ -116,6 +125,52 @@ $$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVid
 2. **音频轨内存消耗** $\le 8\text{ MiB}$（低于 Chromium 12 MiB 硬顶，预留 4 MiB 安全余量）；
 3. **综合内存消耗** $\le 118\text{ MiB}$（低于 162 MB 合计硬顶，预留 44 MB 安全余量）。
 
+### 4. v3.3-beta 架构突破：实时分片追踪引擎与闭环物理内存调控 (Real-Time Chunk Tracking & Closed-Loop Budgeting)
+
+```
+[ Bilibili DASH Loader (fMP4 / m4s) ]
+                 │
+                 ▼
+  [ SourceBuffer.prototype.appendBuffer(ArrayBuffer) ]  <── [ ChunkTracker Hook ]
+                 │                                                │
+                 ▼                                                ├─ Exact Physical Bytes (byteLength)
+    [ Chromium Video/Audio Memory ]                               ├─ Timestamp Delta (ΔTime = end - start)
+                 │                                                ├─ Track Separation (Video vs Audio)
+                 ▼                                                └─ Physical Chunk Ledger
+  [ video.buffered & currentTime ]                                       │
+                 │                                                       ▼
+                 └───────────────────────────────► [ Active Buffer Physical Memory ]
+                                                   [ Rolling Window VBR Bitrate ]
+                                                                 │
+                                                                 ▼
+                                                  [ Closed-Loop Buffer Regulation ]
+```
+
+#### 痛点剖析：静态清单码率在极端 VBR 场景下的局限性
+在传统模型中，前向内存通过 `bufferedAhead × manifestBitrate` 进行预估。然而在 3D 游戏高负载场景（如游戏跑分视频 `BV1oZeA6fERD`）、舞台灯光频闪或复杂特效场景下，视频编码器通常使用极其激进的**可变码率（VBR）**控制。特定高动态片段的瞬间峰值码率可达清单标称均值的 **2~4 倍**！
+- 若单纯信任清单码率，播放器会预载过多超大容量的分片；
+- 真实物理内存迅速逼近并突破 Chromium 的 **150 MiB 视频轨硬顶**；
+- 触发浏览器的强制 GC 驱逐清空，导致缓冲区坍塌、视频黑屏转圈甚至无限重缓冲循环。
+
+#### 核心解法：底层 MSE 分片拦截与闭环调控
+1. **真实物理账本 (`ChunkTracker`)**：
+   - 脚本声明 `@run-at document-start`，在 B 站 Dash 加载器初始化前拦截 `MediaSource.prototype.addSourceBuffer` 与 `SourceBuffer.prototype.appendBuffer`；
+   - 监听 `updateend`，通过高精度前后时序差分算法（`diffRanges`）提取分片时间范围 $[start, end]$，精确捕获 `data.byteLength` 物理载荷；
+   - 维护前向物理分片账本，动态求交当前播放进度 $[currentTime, forwardEnd]$，精确统计**真正驻留在内存中的前向物理字节**；
+   - 监听 `SourceBuffer.prototype.remove`，实现历史播放分片与快进裁剪分片的精准账本修剪。
+2. **动态滑动窗口码率 (Rolling Bitrate)**：
+   - 基于最近下载的 $N$ 个真实分片计算移动平均传输速率：
+     $$\text{rollingVideoBps} = \frac{\sum \text{chunk.bytes}}{\sum \text{chunk.duration}}$$
+   - 自适应捕获浪涌：$\text{effectiveVideoBps} = \max(\text{manifestVideoBps},\; \text{rollingVideoBps})$。当高复杂度场景爆发时，安全时长即刻动态收缩。
+3. **音视频双轨 90% 闭环物理内存防爆熔断**：
+   - 当实测前向视频物理内存逼近 110 MiB 安全线（$\ge 90\% \approx 99\text{ MiB}$）或音频物理内存逼近 8 MiB 安全线（$\ge 90\% \approx 7.2\text{ MiB}$）时，目标缓冲秒数自动熔断封顶至当前已缓冲量：
+     $$\text{safeSeconds} = \min\left(\text{safeSeconds},\; \max(20,\; \lfloor\text{currentBuffered}\rfloor)\right)$$
+   - 强制播放器停止拉取新分片，给 Chromium 预留充足的绝对安全余量，直至播放推进、内存释放后才继续预载，从物理层面彻底根除单轨超限引发的 GC 缓存重设。
+4. **高精差分与首屏分片安全机制**：
+   - 支持双向边界扩展匹配，杜绝清晰度切换或跨度关键帧替换导致分片漏统；
+   - 区分初始挂载与真实换源，首屏捕获分片安全持久化；
+   - 统一提取器容错 DASH 流首帧 0.5s 呈现偏移，全场景精准捕捉前向有效缓冲。
+
 ---
 
 ## 🛠️ 配置说明 / Configuration
@@ -154,6 +209,24 @@ const CONFIG = {
 ## 📝 版本更新历史 / Changelog
 
 ### 🚀 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
+
+#### v3.3-beta (2026-09) - *里程碑升级：MSE 分片实时物理追踪与闭环防爆架构*
+- 📦 **实时 MSE 分片追踪引擎 (`ChunkTracker`)**：
+  - 底层拦截 `MediaSource.prototype.addSourceBuffer`，精准标记音视频分片轨属（`video` / `audio`）；
+  - 拦截 `SourceBuffer.prototype.appendBuffer`，监听 `updateend` 并使用时序差分算法提取分片物理大小（`data.byteLength`）与时序区间 $[start, end]$，记录物理分片账本；
+  - 拦截 `SourceBuffer.prototype.remove`，实现用户快进或内核历史裁剪时的精确物理区间修剪；
+  - 建立滑动窗口移动平均码率计算（Rolling Bitrate），秒级感知场景动态复杂度。
+- 🧠 **闭环自适应流控与音视频双轨物理防爆 (Closed-Loop Budgeting)**：
+  - 引入 $\text{effectiveVideoBps} = \max(\text{manifestBps}, \text{rollingBps})$ 动态码率自适应，针对高动态 3D 游戏（如 `BV1oZeA6fERD`）瞬间压缩目标时长，杜绝物理过载；
+  - 引入音视频双轨 90% 前向物理内存安全熔断（视频 99 MiB / 音频 7.2 MiB），任一单轨逼近上限时自适应封顶前向缓冲，从根本上杜绝 Chromium 150 MiB 视频与 12 MiB 音频内存 GC 驱逐与重缓冲崩溃；
+  - 亚秒级抖动抑制：滑动窗口设置 1.0s 最小采样时长门槛，消除单帧 I 帧瞬时虚高噪点；
+  - 冷启动与换源兼容：修复首屏启动分片持久化，仅切集换源重置账本；未收集分片时全自动平滑降级至清单双配额模型。
+- ⏱️ **执行生命周期提前至 `@run-at document-start`**：
+  - 在播放器 Dash.js 内核加载前即注入底层 MSE 原型钩子，确保从第 1 个分片起 100% 完整捕获；
+  - DOM 依赖组件（UI、事件监听）自适应延迟至 `DOMContentLoaded` 唤醒。
+- 🎨 **双 UI 物理实测数据展示**：
+  - 原生统计面板集成物理实测数据，实测内存高亮附带专属绿色 `实测` 标识；
+  - 控制栏悬浮微标 Tooltip 增加分轨实测与物理总容量对比展示。
 
 #### v3.2 (2026-09)
 - 🛡️ **双配额独立内存安全预算 (Dual-Quota Memory Budget)**：
@@ -213,14 +286,14 @@ const CONFIG = {
 
 ## 📥 安装指南 / Installation
 
-### 途径一：本仓库持续维护版（v3.2+ 推荐）
+### 途径一：本仓库持续维护版（v3.3-beta+ 推荐）
 
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
 2. 点击下方链接一键安装最新重构版：
-   - 👉 **[安装 v3.2+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - 👉 **[安装 v3.3-beta+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
    - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
 
 ### 途径二：Greasy Fork 原版（v2.2 基础归档）

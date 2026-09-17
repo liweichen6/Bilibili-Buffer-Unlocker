@@ -3,7 +3,7 @@
 // @name:zh      B站缓冲解限
 // @name:en      Bilibili Buffer Unlocker
 // @namespace    https://github.com/liweichen6/Bilibili-Buffer-Unlocker
-// @version      3.2
+// @version      3.3-beta
 // @description  Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI. 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:zh 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:en Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI
@@ -13,7 +13,7 @@
 // @match        *://*.bilibili.com/*
 // @match        *://bilibili.com/*
 // @grant        unsafeWindow
-// @run-at       document-end
+// @run-at       document-start
 // @noframes
 // @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js
@@ -39,7 +39,7 @@
     const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
     const Utils = {
-        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.2',
+        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.3-beta',
 
         formatTime: (s) => {
             if (!Number.isFinite(s) || s < 0) return '0s';
@@ -56,9 +56,399 @@
             if (mb < 0.1) return '<0.1 MB';
             if (mb < 10) return `${mb.toFixed(1)} MB`;
             return `${Math.round(mb)} MB`;
+        },
+
+        // 从 video.buffered 中提取并合并与当前播放进度匹配的前向连续时间区间
+        getForwardBufferedRange: (video) => {
+            if (!video || !video.buffered) return null;
+            const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+            const count = video.buffered.length;
+            if (count === 0) return null;
+
+            const raw = [];
+            for (let i = 0; i < count; i++) {
+                const s = video.buffered.start(i);
+                const e = video.buffered.end(i);
+                if (Number.isFinite(s) && Number.isFinite(e) && s <= e) {
+                    raw.push({ start: s, end: e });
+                }
+            }
+            if (raw.length === 0) return null;
+            raw.sort((a, b) => a.start - b.start);
+
+            const merged = [];
+            for (let i = 0; i < raw.length; i++) {
+                const r = raw[i];
+                if (merged.length === 0) {
+                    merged.push({ start: r.start, end: r.end });
+                } else {
+                    const prev = merged[merged.length - 1];
+                    if (r.start <= prev.end + 0.25) {
+                        prev.end = Math.max(prev.end, r.end);
+                    } else {
+                        merged.push({ start: r.start, end: r.end });
+                    }
+                }
+            }
+
+            for (let i = 0; i < merged.length; i++) {
+                const { start, end } = merged[i];
+                // 允许起点微小提前量 (0.5s)，并对播放初期 (<=0.5s) 的首帧偏移做容错
+                if ((currentTime >= start - 0.5 || (currentTime <= 0.5 && start <= 0.5)) && currentTime <= end) {
+                    return {
+                        start,
+                        end,
+                        ahead: Math.max(0, end - currentTime)
+                    };
+                }
+            }
+            return null;
         }
     };
 
+    // === MSE 分片实时追踪引擎 ===
+    const ChunkTracker = {
+        videoLedger: [],
+        audioLedger: [],
+        MAX_LEDGER_ENTRIES: 500,
+        _seq: 0,
+
+        // 辅助：提取并标准化 TimeRanges 数组
+        snapshotRanges: (buffered) => {
+            if (!buffered) return [];
+            const res = [];
+            for (let i = 0; i < buffered.length; i++) {
+                const s = buffered.start(i);
+                const e = buffered.end(i);
+                if (Number.isFinite(s) && Number.isFinite(e) && s <= e) {
+                    res.push({ start: s, end: e });
+                }
+            }
+            return res;
+        },
+
+        // 辅助：对比 appendBuffer 前后 Range 差分，提取新增或扩展的时间区间 [start, end]
+        diffRanges: (before, after) => {
+            if (!after || after.length === 0) return null;
+            if (!before || before.length === 0) {
+                const last = after[after.length - 1];
+                return { start: last.start, end: last.end, duration: last.end - last.start };
+            }
+
+            for (let i = 0; i < after.length; i++) {
+                const a = after[i];
+                const overlapping = before.filter(b => Math.max(a.start, b.start) < Math.min(a.end, b.end) + 0.05);
+
+                if (overlapping.length === 0) {
+                    return { start: a.start, end: a.end, duration: a.end - a.start };
+                }
+
+                const maxBeforeEnd = Math.max(...overlapping.map(b => b.end));
+                const minBeforeStart = Math.min(...overlapping.map(b => b.start));
+
+                // 两侧同时扩展（例如质量切换覆盖或大跨度关键帧段）
+                if (a.start < minBeforeStart - 0.05 && a.end > maxBeforeEnd + 0.05) {
+                    return { start: a.start, end: a.end, duration: a.end - a.start };
+                }
+
+                // 右侧扩展（最常见的顺序流式加载）
+                if (a.end > maxBeforeEnd + 0.05) {
+                    const start = Math.max(a.start, maxBeforeEnd);
+                    return { start, end: a.end, duration: a.end - start };
+                }
+
+                // 左侧扩展
+                if (a.start < minBeforeStart - 0.05) {
+                    const end = Math.min(a.end, minBeforeStart);
+                    return { start: a.start, end, duration: end - a.start };
+                }
+
+                // 缝隙填充
+                if (overlapping.length >= 2) {
+                    overlapping.sort((x, y) => x.start - y.start);
+                    for (let j = 0; j < overlapping.length - 1; j++) {
+                        const gapStart = overlapping[j].end;
+                        const gapEnd = overlapping[j + 1].start;
+                        if (gapEnd > gapStart + 0.05) {
+                            return { start: gapStart, end: gapEnd, duration: gapEnd - gapStart };
+                        }
+                    }
+                }
+            }
+
+            return null;
+        },
+
+        // 裁剪指定账本中的时间区间 [removeStart, removeEnd]
+        pruneInterval: (ledger, removeStart, removeEnd) => {
+            if (!ledger || ledger.length === 0 || removeStart >= removeEnd) return;
+            const next = [];
+            for (let i = 0; i < ledger.length; i++) {
+                const c = ledger[i];
+                if (c.end <= removeStart || c.start >= removeEnd) {
+                    next.push(c);
+                } else if (c.start >= removeStart && c.end <= removeEnd) {
+                    continue;
+                } else if (c.start < removeStart && c.end > removeEnd) {
+                    const dur1 = removeStart - c.start;
+                    const dur2 = c.end - removeEnd;
+                    const b1 = Math.round(c.bytes * (dur1 / c.duration));
+                    const b2 = Math.round(c.bytes * (dur2 / c.duration));
+                    if (dur1 > 0.01 && b1 > 0) {
+                        next.push({
+                            track: c.track,
+                            start: c.start,
+                            end: removeStart,
+                            duration: dur1,
+                            bytes: b1,
+                            timestamp: c.timestamp,
+                            seq: c.seq
+                        });
+                    }
+                    if (dur2 > 0.01 && b2 > 0) {
+                        next.push({
+                            track: c.track,
+                            start: removeEnd,
+                            end: c.end,
+                            duration: dur2,
+                            bytes: b2,
+                            timestamp: c.timestamp,
+                            seq: c.seq
+                        });
+                    }
+                } else if (c.start < removeStart && c.end <= removeEnd) {
+                    const dur = removeStart - c.start;
+                    const b = Math.round(c.bytes * (dur / c.duration));
+                    if (dur > 0.01 && b > 0) {
+                        next.push({
+                            track: c.track,
+                            start: c.start,
+                            end: removeStart,
+                            duration: dur,
+                            bytes: b,
+                            timestamp: c.timestamp,
+                            seq: c.seq
+                        });
+                    }
+                } else if (c.start >= removeStart && c.end > removeEnd) {
+                    const dur = c.end - removeEnd;
+                    const b = Math.round(c.bytes * (dur / c.duration));
+                    if (dur > 0.01 && b > 0) {
+                        next.push({
+                            track: c.track,
+                            start: removeEnd,
+                            end: c.end,
+                            duration: dur,
+                            bytes: b,
+                            timestamp: c.timestamp,
+                            seq: c.seq
+                        });
+                    }
+                }
+            }
+            ledger.length = 0;
+            ledger.push(...next);
+        },
+
+        // 记录新分片
+        recordChunk: (track, start, end, bytes) => {
+            const duration = end - start;
+            if (duration <= 0.02 || bytes <= 0 || !Number.isFinite(start) || !Number.isFinite(end)) return;
+
+            const ledger = (track === 'audio') ? ChunkTracker.audioLedger : ChunkTracker.videoLedger;
+            // 剔除覆盖/重叠的历史区间，避免重复统计
+            ChunkTracker.pruneInterval(ledger, start, end);
+
+            ledger.push({
+                track,
+                start,
+                end,
+                bytes,
+                duration,
+                timestamp: Date.now(),
+                seq: ++ChunkTracker._seq
+            });
+
+            ledger.sort((a, b) => a.start - b.start);
+            if (ledger.length > ChunkTracker.MAX_LEDGER_ENTRIES) {
+                ledger.splice(0, ledger.length - ChunkTracker.MAX_LEDGER_ENTRIES);
+            }
+        },
+
+        // SourceBuffer.prototype.remove 触发账本修剪
+        onRemove: (track, start, end) => {
+            if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return;
+            const ledger = (track === 'audio') ? ChunkTracker.audioLedger : ChunkTracker.videoLedger;
+            ChunkTracker.pruneInterval(ledger, start, end);
+        },
+
+        // 计算当前播放点向前连续缓冲的真实物理内存
+        getActualBufferedBytes: (video, track = null) => {
+            try {
+                const v = video || document.querySelector('video');
+                if (!v || !Number.isFinite(v.currentTime)) {
+                    if (track === 'video') return 0;
+                    if (track === 'audio') return 0;
+                    return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                }
+
+                const currentTime = v.currentTime;
+                const range = Utils.getForwardBufferedRange(v);
+                const forwardEnd = range ? range.end : currentTime;
+
+                if (forwardEnd <= currentTime) {
+                    if (track === 'video') return 0;
+                    if (track === 'audio') return 0;
+                    return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                }
+
+                const calcTrackBytes = (ledger) => {
+                    if (!ledger || ledger.length === 0) return 0;
+                    let bytes = 0;
+                    for (let i = 0; i < ledger.length; i++) {
+                        const c = ledger[i];
+                        if (c.end <= currentTime || c.start >= forwardEnd) continue;
+                        const oStart = Math.max(c.start, currentTime);
+                        const oEnd = Math.min(c.end, forwardEnd);
+                        const oDur = Math.max(0, oEnd - oStart);
+                        if (oDur > 0 && c.duration > 0) {
+                            const ratio = Math.min(1, oDur / c.duration);
+                            bytes += Math.round(c.bytes * ratio);
+                        }
+                    }
+                    return bytes;
+                };
+
+                const videoBytes = calcTrackBytes(ChunkTracker.videoLedger);
+                const audioBytes = calcTrackBytes(ChunkTracker.audioLedger);
+                const totalBytes = videoBytes + audioBytes;
+
+                if (track === 'video') return videoBytes;
+                if (track === 'audio') return audioBytes;
+
+                return {
+                    videoBytes,
+                    audioBytes,
+                    totalBytes,
+                    valueOf() { return this.totalBytes; }
+                };
+            } catch {
+                if (track === 'video') return 0;
+                if (track === 'audio') return 0;
+                return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+            }
+        },
+
+        // 计算最近分片的滑动窗口移动平均码率 (Bytes/s)
+        getRollingBitrate: (track = 'video', targetDuration = 30) => {
+            const ledger = (track === 'audio') ? ChunkTracker.audioLedger : ChunkTracker.videoLedger;
+            if (!ledger || ledger.length === 0) return 0;
+
+            // 按分片追加时间倒序（最近下载的分片优先）
+            const recent = [...ledger].sort((a, b) => (b.timestamp - a.timestamp) || ((b.seq || 0) - (a.seq || 0)));
+
+            let totalBytes = 0;
+            let totalDuration = 0;
+
+            for (let i = 0; i < recent.length; i++) {
+                const c = recent[i];
+                if (c.duration <= 0 || c.bytes <= 0) continue;
+                totalBytes += c.bytes;
+                totalDuration += c.duration;
+                if (totalDuration >= targetDuration) break;
+            }
+
+            // 样本时长至少需达到 1 秒，防止单帧极短分片（如 0.04s 的关键帧段）产生虚假瞬时码率暴增引发缓冲剧烈抖动
+            if (totalDuration < 1.0) return 0;
+
+            return totalBytes / totalDuration;
+        },
+
+        // 清空账本 (视频切换/重置时调用)
+        reset: () => {
+            ChunkTracker.videoLedger.length = 0;
+            ChunkTracker.audioLedger.length = 0;
+            ChunkTracker._seq = 0;
+        },
+
+        // 初始化拦截钩子
+        init: () => {
+            try {
+                const targets = [];
+                if (typeof win !== 'undefined' && win) targets.push(win);
+                if (typeof window !== 'undefined' && window && window !== win) targets.push(window);
+
+                const hookSourceBufferProto = (SBProto) => {
+                    if (!SBProto || SBProto.appendBuffer?.__hooked) return;
+
+                    const origAppendBuffer = SBProto.appendBuffer;
+                    SBProto.appendBuffer = function (data) {
+                        const sb = this;
+                        const track = sb.__trackType || 'video';
+                        const byteLength = (typeof data?.byteLength === 'number')
+                            ? data.byteLength
+                            : (typeof data?.buffer?.byteLength === 'number' ? data.buffer.byteLength : 0);
+                        const rangesBefore = ChunkTracker.snapshotRanges(sb.buffered);
+
+                        const onUpdateEnd = () => {
+                            try {
+                                const rangesAfter = ChunkTracker.snapshotRanges(sb.buffered);
+                                const diff = ChunkTracker.diffRanges(rangesBefore, rangesAfter);
+                                if (diff && diff.duration > 0.02) {
+                                    ChunkTracker.recordChunk(track, diff.start, diff.end, byteLength);
+                                }
+                            } catch {}
+                        };
+
+                        // 先行调用底层原生方法，若抛出异常（如 QuotaExceededError / updating 状态错误）则不注册悬挂事件
+                        const ret = origAppendBuffer.apply(this, arguments);
+                        try {
+                            sb.addEventListener('updateend', onUpdateEnd, { once: true });
+                        } catch {}
+                        return ret;
+                    };
+                    SBProto.appendBuffer.__hooked = true;
+
+                    const origRemove = SBProto.remove;
+                    if (origRemove && !origRemove.__hooked) {
+                        SBProto.remove = function (start, end) {
+                            try {
+                                const track = this.__trackType || 'video';
+                                ChunkTracker.onRemove(track, Number(start), Number(end));
+                            } catch {}
+                            return origRemove.apply(this, arguments);
+                        };
+                        SBProto.remove.__hooked = true;
+                    }
+                };
+
+                targets.forEach(targetWin => {
+                    const MS = targetWin.MediaSource;
+                    if (MS && MS.prototype && !MS.prototype.addSourceBuffer.__hooked) {
+                        const origAddSourceBuffer = MS.prototype.addSourceBuffer;
+                        MS.prototype.addSourceBuffer = function (mimeType) {
+                            const sb = origAddSourceBuffer.apply(this, arguments);
+                            try {
+                                const lower = String(mimeType || '').toLowerCase();
+                                sb.__trackType = lower.includes('video') ? 'video' : (lower.includes('audio') ? 'audio' : 'unknown');
+                                hookSourceBufferProto(sb.constructor?.prototype || targetWin.SourceBuffer?.prototype);
+                            } catch {}
+                            return sb;
+                        };
+                        MS.prototype.addSourceBuffer.__hooked = true;
+                    }
+
+                    if (targetWin.SourceBuffer && targetWin.SourceBuffer.prototype) {
+                        hookSourceBufferProto(targetWin.SourceBuffer.prototype);
+                    }
+                });
+            } catch (e) {
+                console.warn('[缓冲解限] ChunkTracker 钩子安装异常:', e);
+            }
+        }
+    };
+
+    // === 核心业务管理器 ===
     const CoreManager = {
         _lastBufferedTime: 0,
         _lastCurrentTime: 0,
@@ -150,6 +540,24 @@
             }
         },
 
+        // 获取当前连续向前有效缓冲时长 (秒)
+        getBufferedAhead: (video) => {
+            try {
+                const v = video || document.querySelector('video');
+                if (!v) return 0;
+                const range = Utils.getForwardBufferedRange(v);
+                if (range) return range.ahead;
+
+                const core = CoreManager.getCore();
+                if (core && typeof core.getBufferLength === 'function') {
+                    return Math.max(0, Number(core.getBufferLength()) || 0);
+                }
+                return 0;
+            } catch {
+                return 0;
+            }
+        },
+
         // 从媒体元数据获取当前音视频总传输速率 (Bytes/s)
         getCurrentBytesPerSecond: () => {
             return CoreManager.getMediaRates().totalBps;
@@ -219,15 +627,53 @@
             }
         },
 
-        // 动态根据码率计算内存安全的最大缓冲时长（音视频双配额隔离预算）
+        // 动态根据码率与分片实测计算内存安全的最大缓冲时长（闭环动态预算）
         calculateSafeDuration: () => {
-            const { videoBps, audioBps, totalBps } = CoreManager.getMediaRates();
-            if (totalBps <= 0) return CONFIG.MAX_TIME_LIMIT;
+            const { videoBps: manifestVideoBps, audioBps: manifestAudioBps } = CoreManager.getMediaRates();
+            const rollingVideoBps = ChunkTracker.getRollingBitrate('video');
+            const rollingAudioBps = ChunkTracker.getRollingBitrate('audio');
 
-            const safeVideoSec = videoBps > 0 ? (CONFIG.SAFE_VIDEO_BYTE_LIMIT / videoBps) : CONFIG.MAX_TIME_LIMIT;
-            const safeAudioSec = audioBps > 0 ? (CONFIG.SAFE_AUDIO_BYTE_LIMIT / audioBps) : CONFIG.MAX_TIME_LIMIT;
+            // 自适应捕捉 VBR 浪涌：取静态清单码率与实测滑动窗口码率的较大值
+            const effectiveVideoBps = Math.max(manifestVideoBps || 0, rollingVideoBps || 0);
+            const effectiveAudioBps = Math.max(manifestAudioBps || 0, rollingAudioBps || 0);
+            const effectiveTotalBps = effectiveVideoBps + effectiveAudioBps;
 
-            const safeSeconds = Math.min(safeAudioSec, safeVideoSec, CONFIG.MAX_TIME_LIMIT);
+            if (effectiveTotalBps <= 0) return CONFIG.MAX_TIME_LIMIT;
+
+            const safeVideoSec = effectiveVideoBps > 0 ? (CONFIG.SAFE_VIDEO_BYTE_LIMIT / effectiveVideoBps) : CONFIG.MAX_TIME_LIMIT;
+            const safeAudioSec = effectiveAudioBps > 0 ? (CONFIG.SAFE_AUDIO_BYTE_LIMIT / effectiveAudioBps) : CONFIG.MAX_TIME_LIMIT;
+
+            let safeSeconds = Math.min(safeAudioSec, safeVideoSec, CONFIG.MAX_TIME_LIMIT);
+
+            // 闭环物理内存节流控制 (Closed-Loop Physical Memory Regulation)
+            const video = document.querySelector('video');
+            const actual = ChunkTracker.getActualBufferedBytes(video);
+            const actualVideoBytes = actual?.videoBytes || 0;
+            const actualAudioBytes = actual?.audioBytes || 0;
+            const currentBuffered = CoreManager.getBufferedAhead(video);
+
+            const isVideoNearLimit = actualVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90;
+            const isAudioNearLimit = actualAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90;
+
+            if (isVideoNearLimit || isAudioNearLimit) {
+                // 当音视频任一物理内存达到安全上限 90% 时，强制限制目标缓冲至当前缓冲量，停止拉取新分片
+                safeSeconds = Math.min(safeSeconds, Math.max(CONFIG.MIN_TIME_LIMIT, Math.floor(currentBuffered)));
+            } else {
+                // 基于音视频各自剩余物理配额的平滑缓冲节流
+                let maxAllowedSec = CONFIG.MAX_TIME_LIMIT;
+                if (actualVideoBytes > 0 && effectiveVideoBps > 0) {
+                    const remainingVideoBytes = Math.max(0, CONFIG.SAFE_VIDEO_BYTE_LIMIT - actualVideoBytes);
+                    const allowedVideoSec = remainingVideoBytes / effectiveVideoBps;
+                    maxAllowedSec = Math.min(maxAllowedSec, Math.floor(currentBuffered + allowedVideoSec));
+                }
+                if (actualAudioBytes > 0 && effectiveAudioBps > 0) {
+                    const remainingAudioBytes = Math.max(0, CONFIG.SAFE_AUDIO_BYTE_LIMIT - actualAudioBytes);
+                    const allowedAudioSec = remainingAudioBytes / effectiveAudioBps;
+                    maxAllowedSec = Math.min(maxAllowedSec, Math.floor(currentBuffered + allowedAudioSec));
+                }
+                safeSeconds = Math.min(safeSeconds, Math.max(CONFIG.MIN_TIME_LIMIT, maxAllowedSec));
+            }
+
             return Math.max(CONFIG.MIN_TIME_LIMIT, Math.floor(safeSeconds));
         },
 
@@ -271,12 +717,19 @@
                     const hasValidCurrent = Number.isFinite(currentSetting);
                     const effectiveSetting = hasValidCurrent ? currentSetting : CoreManager._lastAppliedTarget;
 
-                    // 容差判定：当当前设置与目标不一致时，在未设置、升级至解限(>=30s)或差值超过容差死区时更新
+                    const video = document.querySelector('video');
+                    const actual = ChunkTracker.getActualBufferedBytes(video);
+                    const isNearLimit = (actual?.videoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
+                                        (actual?.audioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90);
+                    const isUrgentDownward = isNearLimit && (targetSeconds < effectiveSetting);
+
+                    // 容差判定：当当前设置与目标不一致时，在未设置、升级至解限(>=30s)、差值超过容差死区或处于物理防爆紧急下调时更新
                     const shouldUpdate = force || (
                         effectiveSetting !== targetSeconds && (
                             !Number.isFinite(effectiveSetting) ||
                             (effectiveSetting < 30 && targetSeconds >= 30) ||
-                            Math.abs(effectiveSetting - targetSeconds) >= CONFIG.HYSTERESIS_DELTA
+                            Math.abs(effectiveSetting - targetSeconds) >= CONFIG.HYSTERESIS_DELTA ||
+                            isUrgentDownward
                         )
                     );
 
@@ -296,9 +749,12 @@
         // 智能异常裁剪诊断（过滤用户正常拖动、回退、切换视频等行为）
         trackBufferHealth: (bufferedAhead, currentTime, currentVideoSrc, isSeeking) => {
             try {
-                if (CoreManager._lastVideoSrc !== currentVideoSrc) {
+                if (CoreManager._lastVideoSrc && CoreManager._lastVideoSrc !== currentVideoSrc) {
                     CoreManager._hiResLogged = false;
                     CoreManager._lastAppliedTarget = null;
+                    if (currentVideoSrc) {
+                        ChunkTracker.reset();
+                    }
                 }
                 if (CoreManager._lastVideoSrc === currentVideoSrc && !isSeeking) {
                     const timeDelta = currentTime - CoreManager._lastCurrentTime;
@@ -322,7 +778,13 @@
                 const video = document.querySelector('video');
                 if (!video && !core) return null;
 
-                const bps = CoreManager.getCurrentBytesPerSecond();
+                const { videoBps: manifestVideoBps, audioBps: manifestAudioBps } = CoreManager.getMediaRates();
+                const rollingVideoBps = ChunkTracker.getRollingBitrate('video');
+                const rollingAudioBps = ChunkTracker.getRollingBitrate('audio');
+                const effectiveVideoBps = Math.max(manifestVideoBps || 0, rollingVideoBps || 0);
+                const effectiveAudioBps = Math.max(manifestAudioBps || 0, rollingAudioBps || 0);
+                let effectiveTotalBps = effectiveVideoBps + effectiveAudioBps;
+
                 const hiRes = CoreManager.isHiRes();
 
                 // 目标缓冲时长基准
@@ -342,52 +804,21 @@
                     remainingTime = Math.max(0, video.duration - currentTime);
                 }
 
-                // 精准计算当前播放进度点向后的连续有效缓冲时长 (合并微小缝隙 <= 0.25s 的相邻区间)
-                let bufferedAhead = 0;
-                if (video && video.buffered && video.buffered.length > 0) {
-                    const ranges = video.buffered;
-                    const raw = [];
-                    for (let i = 0; i < ranges.length; i++) {
-                        const s = ranges.start(i);
-                        const e = ranges.end(i);
-                        if (Number.isFinite(s) && Number.isFinite(e) && s <= e) {
-                            raw.push({ start: s, end: e });
-                        }
-                    }
-                    raw.sort((a, b) => a.start - b.start);
-
-                    const mergedRanges = [];
-                    for (let i = 0; i < raw.length; i++) {
-                        const { start, end } = raw[i];
-                        if (mergedRanges.length === 0) {
-                            mergedRanges.push({ start, end });
-                        } else {
-                            const prev = mergedRanges[mergedRanges.length - 1];
-                            if (start <= prev.end + 0.25) {
-                                prev.end = Math.max(prev.end, end);
-                            } else {
-                                mergedRanges.push({ start, end });
-                            }
-                        }
-                    }
-
-                    for (let i = 0; i < mergedRanges.length; i++) {
-                        const { start, end } = mergedRanges[i];
-                        if (currentTime >= start - 0.25 && currentTime <= end) {
-                            bufferedAhead = Math.max(0, end - currentTime);
-                            break;
-                        }
-                    }
-                }
-
-                // 核心诊断 fallback
-                if (bufferedAhead === 0 && core && typeof core.getBufferLength === 'function') {
-                    try {
-                        bufferedAhead = Math.max(0, Number(core.getBufferLength()) || 0);
-                    } catch {}
-                }
-
+                const bufferedAhead = CoreManager.getBufferedAhead(video);
                 const finalTargetTime = Number.isFinite(remainingTime) ? Math.min(baseTargetTime, remainingTime) : baseTargetTime;
+
+                // 获取实测物理分片内存
+                const actual = ChunkTracker.getActualBufferedBytes(video);
+                const actualTotal = actual?.totalBytes || 0;
+                const actualVideo = actual?.videoBytes || 0;
+                const actualAudio = actual?.audioBytes || 0;
+                const hasActual = actualTotal > 0;
+
+                if (effectiveTotalBps <= 0 && hasActual && bufferedAhead > 0) {
+                    effectiveTotalBps = actualTotal / bufferedAhead;
+                }
+
+                const bps = effectiveTotalBps;
 
                 return {
                     time: {
@@ -398,7 +829,11 @@
                     memory: {
                         current: bufferedAhead * bps,
                         target: finalTargetTime * bps,
-                        limit: CONFIG.SAFE_BYTE_LIMIT
+                        limit: CONFIG.SAFE_BYTE_LIMIT,
+                        actualCurrent: actualTotal,
+                        actualVideo: actualVideo,
+                        actualAudio: actualAudio,
+                        hasActual: hasActual
                     },
                     bps,
                     hiRes
@@ -409,6 +844,7 @@
         }
     };
 
+    // === UI 展示管理 ===
     const UIManager = {
         timer: null,
         statsPanelRef: null,
@@ -451,6 +887,7 @@
                             <span id="buf-time-tar" style="color:#888;">0s</span>
                             <span style="display:inline-block; width:1px; height:10px; background:#444; margin:0 8px;"></span>
                             <span id="buf-mem-cur" style="color:#bae637;">0 MB</span>
+                            <span id="buf-mem-actual-tag" style="display:none; color:#52c41a; font-size:10px; margin-left:4px; border:1px solid rgba(82,196,26,0.5); border-radius:3px; padding:0 2px;">实测</span>
                             <span style="color:#666; margin:0 2px;">/</span>
                             <span id="buf-mem-tar" style="color:#888; font-size:11px;">0 MB</span>
                             <span id="buf-hires-tag" style="display:none; color:#ff85c0; font-size:10px; margin-left:6px; border:1px solid #ff85c0; border-radius:3px; padding:0 3px;">Hi-Res 免干预</span>
@@ -464,6 +901,7 @@
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
                     memCur: panel.querySelector('#buf-mem-cur'),
+                    memActualTag: panel.querySelector('#buf-mem-actual-tag'),
                     memTar: panel.querySelector('#buf-mem-tar'),
                     hiresTag: panel.querySelector('#buf-hires-tag')
                 };
@@ -473,6 +911,7 @@
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
                     memCur: panel.querySelector('#buf-mem-cur'),
+                    memActualTag: panel.querySelector('#buf-mem-actual-tag'),
                     memTar: panel.querySelector('#buf-mem-tar'),
                     hiresTag: panel.querySelector('#buf-hires-tag')
                 };
@@ -485,7 +924,17 @@
             el.timeCur.textContent = Utils.formatTime(stats.time.current);
             el.timeCur.style.color = isHealthy ? '#52c41a' : '#faad14';
             el.timeTar.textContent = Utils.formatTime(stats.time.target);
-            el.memCur.textContent = Utils.formatSize(stats.memory.current);
+
+            if (stats.memory.hasActual) {
+                el.memCur.textContent = Utils.formatSize(stats.memory.actualCurrent);
+                if (el.memActualTag) el.memActualTag.style.display = 'inline';
+                el.memCur.title = `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (估算: ${Utils.formatSize(stats.memory.current)})`;
+            } else {
+                el.memCur.textContent = Utils.formatSize(stats.memory.current);
+                if (el.memActualTag) el.memActualTag.style.display = 'none';
+                el.memCur.title = `估算内存: ${Utils.formatSize(stats.memory.current)}`;
+            }
+
             el.memTar.textContent = Utils.formatSize(stats.memory.target);
             el.hiresTag.style.display = stats.hiRes ? 'inline' : 'none';
         },
@@ -548,7 +997,10 @@
                     line-height: 20px;
                 }
             `;
-            (document.head || document.documentElement).appendChild(style);
+            const target = document.head || document.documentElement || document.body;
+            if (target && typeof target.appendChild === 'function') {
+                target.appendChild(style);
+            }
         },
 
         // 2. 播放器控制栏常驻微标 (无需右键展开即可常驻查看)
@@ -605,7 +1057,11 @@
             if (UIManager.badgeTextRef) {
                 UIManager.badgeTextRef.textContent = `⚡${Utils.formatTime(stats.time.current)}`;
             }
-            badge.title = `已缓冲: ${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | 内存估算: ${Utils.formatSize(stats.memory.current)} / ${Utils.formatSize(stats.memory.limit)} (点击手动触发解限)`;
+
+            const memText = stats.memory.hasActual
+                ? `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (估算: ${Utils.formatSize(stats.memory.current)})`
+                : `内存估算: ${Utils.formatSize(stats.memory.current)}`;
+            badge.title = `已缓冲: ${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memText} / ${Utils.formatSize(stats.memory.limit)} (点击手动触发解限)`;
         },
 
         update: () => {
@@ -652,14 +1108,28 @@
         video.addEventListener('ratechange', onTrigger);
     };
 
-    const main = () => {
+    // 暴露内部模块供外部/自动化测试调试
+    win.__BiliBufferUnlocker = {
+        CONFIG,
+        Utils,
+        ChunkTracker,
+        CoreManager,
+        UIManager
+    };
+
+    // 立即在 tick 0 初始化底层分片拦截引擎
+    ChunkTracker.init();
+
+    // DOM 就绪后启动播放器事件绑定与 UI 循环
+    let appStarted = false;
+    const startApp = () => {
+        if (appStarted) return;
+        appStarted = true;
         console.log(`[B站缓冲解限] 🚀 脚本已就绪 (v${Utils.version})`);
 
-        // 立即绑定视频生命周期事件并初次尝试优化
         bindVideoEvents();
         CoreManager.applyOptimization();
 
-        // 初始解限优化与事件重绑（应对内核延迟挂载）
         const initRun = () => {
             bindVideoEvents();
             CoreManager.applyOptimization();
@@ -667,15 +1137,18 @@
         setTimeout(initRun, 1000);
         setTimeout(initRun, 2500);
 
-        // 周期检查优化与重绑
         setInterval(() => {
             bindVideoEvents();
             CoreManager.applyOptimization();
         }, CONFIG.CHECK_INTERVAL);
 
-        // 启动 UI 引擎
         UIManager.start();
     };
 
-    main();
+    if (document.readyState !== 'loading' || document.body) {
+        startApp();
+    } else {
+        document.addEventListener('DOMContentLoaded', startApp, { once: true });
+        window.addEventListener('load', startApp, { once: true });
+    }
 })();
