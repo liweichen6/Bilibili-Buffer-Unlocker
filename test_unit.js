@@ -117,19 +117,29 @@ const mockDocument = {
     querySelectorAll: (selector) => {
         return [];
     },
-    getElementById: (id) => null,
+    _elementsById: {},
+    getElementById: (id) => mockDocument._elementsById[id] || null,
     createElement: (tag) => {
-        return {
+        const el = {
             tagName: tag.toUpperCase(),
             style: {},
             innerHTML: '',
             textContent: '',
+            _id: '',
+            set id(val) {
+                this._id = val;
+                mockDocument._elementsById[val] = this;
+            },
+            get id() { return this._id; },
             querySelector: () => ({ style: {}, textContent: '' }),
             querySelectorAll: () => [],
             addEventListener: () => {},
             contains: () => true,
-            remove: () => {}
+            remove: function() {
+                if (this._id) delete mockDocument._elementsById[this._id];
+            }
         };
+        return el;
     },
     addEventListener: () => {}
 };
@@ -299,10 +309,37 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     const actual = ChunkTracker.getActualBufferedBytes(mockVideo);
     // Forward video: [5, 10] (5MB) + [10, 20] (10MB) = 15MB
     assert.strictEqual(actual.videoBytes, 15 * 1024 * 1024, `Expected 15MB forward video, got ${actual.videoBytes}`);
+    assert.strictEqual(actual.forwardVideoBytes, 15 * 1024 * 1024);
     // Forward audio: [5, 20] of [0, 20] (15/20 * 1MB = 786432 bytes)
     const expectedAudio = Math.round(1 * 1024 * 1024 * (15 / 20));
     assert.strictEqual(actual.audioBytes, expectedAudio, `Expected ${expectedAudio} forward audio, got ${actual.audioBytes}`);
+    assert.strictEqual(actual.forwardAudioBytes, expectedAudio);
     assert.strictEqual(actual.totalBytes, actual.videoBytes + actual.audioBytes);
+    assert.strictEqual(actual.forwardTotalBytes, actual.videoBytes + actual.audioBytes);
+
+    // Past video: [0, 5] (5MB)
+    assert.strictEqual(actual.pastVideoBytes, 5 * 1024 * 1024, `Expected 5MB past video, got ${actual.pastVideoBytes}`);
+    // Past audio: [0, 5] of [0, 20] (5/20 * 1MB = 262144 bytes)
+    const expectedPastAudio = Math.round(1 * 1024 * 1024 * (5 / 20));
+    assert.strictEqual(actual.pastAudioBytes, expectedPastAudio, `Expected ${expectedPastAudio} past audio, got ${actual.pastAudioBytes}`);
+    assert.strictEqual(actual.pastTotalBytes, 5 * 1024 * 1024 + expectedPastAudio);
+
+    // Total active ledger across all unpruned chunks:
+    // Video: [0,5] (5M) + [5,10] (5M) + [10,20] (10M) + [20,25] (5M) = 25MB
+    assert.strictEqual(actual.totalVideoBytes, 25 * 1024 * 1024, `Expected 25MB total active video, got ${actual.totalVideoBytes}`);
+    // Audio: [0,20] = 1MB
+    assert.strictEqual(actual.totalAudioBytes, 1 * 1024 * 1024, `Expected 1MB total active audio, got ${actual.totalAudioBytes}`);
+    assert.strictEqual(actual.totalActiveBytes, 26 * 1024 * 1024);
+
+    // ChunkTracker property getters & helper functions
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 25 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalBytes, 26 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('video'), 25 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('audio'), 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes().totalBytes, 26 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(mockVideo, 'video'), 5 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(mockVideo, 'audio'), expectedPastAudio);
     console.log('✓ ChunkTracker.getActualBufferedBytes passed.');
 }
 
@@ -312,29 +349,31 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     ChunkTracker.reset();
 
     // Baseline: manifest says 8 Mbps video (1,000,000 Bps), 320 kbps audio (40,000 Bps)
-    // Safe limits: Video 110 MiB (115,343,360 B), Audio 8 MiB (8,388,608 B)
-    // safeVideoSec = 115,343,360 / 1,000,000 = 115s
-    // safeAudioSec = 8,388,608 / 40,000 = 209s
-    // safeDuration = 115s
+    // Safe limits: Video 125 MiB (131,072,000 B), Audio 9.5 MiB (9,961,472 B)
+    // safeVideoSec = 131,072,000 / 1,000,000 = 131s
+    // safeAudioSec = 9,961,472 / 40,000 = 249s
+    // safeDuration = 131s
     const baseline = CoreManager.calculateSafeDuration();
-    assert.strictEqual(baseline, 115, `Expected baseline 115s, got ${baseline}`);
+    assert.strictEqual(baseline, 131, `Expected baseline 131s, got ${baseline}`);
 
     // Surge: ChunkTracker records rolling bitrate of 3,500,000 Bps (28 Mbps)
     // effectiveVideoBps = max(1,000,000, 3,500,000) = 3,500,000
-    // safeVideoSec = 115,343,360 / 3,500,000 = 32.95s -> 32s
+    // safeVideoSec = 131,072,000 / 3,500,000 = 37.45s -> 37s
+    mockVideo.currentTime = 0;
+    mockVideo.buffered._setRanges([[0, 30]]);
     for (let i = 0; i < 10; i++) {
         ChunkTracker.recordChunk('video', i * 3, (i + 1) * 3, Math.round(3 * 3500000));
     }
     const surgeDuration = CoreManager.calculateSafeDuration();
-    assert.strictEqual(surgeDuration, 32, `Expected 32s under surge, got ${surgeDuration}`);
+    assert.strictEqual(surgeDuration, 37, `Expected 37s under surge, got ${surgeDuration}`);
 
     // Closed-loop regulation: Actual physical memory approaches SAFE_VIDEO_BYTE_LIMIT (>= 90%)
-    // 90% of 110 MiB = 103,809,024 B
+    // 90% of 125 MiB = 112.5 MiB (117,964,800 B)
     // Let current buffered ahead = 28s (video at 0, buffered [0, 28])
     mockVideo.currentTime = 0;
     mockVideo.buffered._setRanges([[0, 28]]);
     ChunkTracker.reset();
-    ChunkTracker.recordChunk('video', 0, 28, 105 * 1024 * 1024); // 105 MiB (>= 90%)
+    ChunkTracker.recordChunk('video', 0, 28, 115 * 1024 * 1024); // 115 MiB (>= 90%)
 
     const throttledDuration = CoreManager.calculateSafeDuration();
     assert.strictEqual(throttledDuration, 28, `Expected target capped at current buffered 28s, got ${throttledDuration}`);
@@ -349,6 +388,8 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert(stats.memory.hasActual === true, 'hasActual should be true when chunks are recorded');
     assert(stats.memory.actualVideo > 0, 'actualVideo should be > 0');
     assert(stats.memory.actualCurrent > 0, 'actualCurrent should be > 0');
+    assert(stats.memory.actualTotalActive !== undefined, 'actualTotalActive should be defined');
+    assert(stats.memory.actualPastTotal !== undefined, 'actualPastTotal should be defined');
 
     // UI update
     UIManager.update();
@@ -366,6 +407,9 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(ChunkTracker.getActualBufferedBytes({ currentTime: -5, buffered: new MockTimeRanges([]) }).totalBytes, 0);
     assert.strictEqual(ChunkTracker.getActualBufferedBytes(null, 'video'), 0);
     assert.strictEqual(ChunkTracker.getActualBufferedBytes(null, 'audio'), 0);
+    assert.strictEqual(ChunkTracker.getActualBufferedBytes(null, 'total'), 0);
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(null, 'total'), 0);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('total'), 0);
 
     // Edge Case 9.2: Chunks behind currentTime or beyond forward buffer
     mockVideo.currentTime = 50;
@@ -413,7 +457,7 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     CoreManager.getMediaRates = origGetMediaRates;
     mockVideo.currentTime = 0;
     mockVideo.buffered._setRanges([[0, 5]]); // Only 5s buffered (< MIN_TIME_LIMIT of 20s)
-    ChunkTracker.recordChunk('video', 0, 5, 110 * 1024 * 1024); // Exceeds 90%
+    ChunkTracker.recordChunk('video', 0, 5, 115 * 1024 * 1024); // Exceeds 90% of 125 MiB
     const cappedBelowMin = CoreManager.calculateSafeDuration();
     assert.strictEqual(cappedBelowMin, CONFIG.MIN_TIME_LIMIT, 'Throttling should never drop below MIN_TIME_LIMIT');
 
@@ -445,10 +489,10 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     mockVideo.currentTime = 0;
     mockVideo.buffered._setRanges([[0, 30]]);
 
-    // Video is well below limit: 20MB of 110 MiB limit
+    // Video is well below limit: 20MB of 125 MiB limit
     ChunkTracker.recordChunk('video', 0, 30, 20 * 1024 * 1024);
-    // Audio approaches 90% of SAFE_AUDIO_BYTE_LIMIT (8 MiB * 0.9 = 7.2 MiB)
-    ChunkTracker.recordChunk('audio', 0, 30, 7.5 * 1024 * 1024);
+    // Audio approaches 90% of SAFE_AUDIO_BYTE_LIMIT (9.5 MiB * 0.9 = 8.55 MiB)
+    ChunkTracker.recordChunk('audio', 0, 30, 9.0 * 1024 * 1024);
 
     const safeSec = CoreManager.calculateSafeDuration();
     assert.strictEqual(safeSec, 30, `Expected safe duration capped to currentBuffered (30s) due to audio limit, got ${safeSec}`);
@@ -530,6 +574,305 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     console.log('✓ Zero manifest bitrate dynamic fallback passed.');
 }
 
+// Test 16: Total Active Ledger vs Forward & Past Decomposition
+{
+    console.log('\n[Test 16] Testing Total Active Ledger vs Forward & Past Decomposition...');
+    ChunkTracker.reset();
+
+    // Mock video with currentTime = 20, forward continuous buffer [20, 50]
+    mockVideo.currentTime = 20;
+    mockVideo.buffered._setRanges([[0, 50]]);
+
+    // Record past video chunks: [0, 10] (10 MB), [10, 20] (10 MB) -> 20 MB past
+    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 10, 20, 10 * 1024 * 1024);
+
+    // Record forward video chunks: [20, 35] (15 MB), [35, 50] (15 MB) -> 30 MB forward
+    ChunkTracker.recordChunk('video', 20, 35, 15 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 35, 50, 15 * 1024 * 1024);
+
+    // Record disjoint future unevicted chunk (e.g. user seek or prefetch) [60, 70] (10 MB)
+    ChunkTracker.recordChunk('video', 60, 70, 10 * 1024 * 1024);
+
+    // Record audio chunk straddling currentTime: [10, 30] (2 MB total)
+    // currentTime = 20: past [10, 20] (1 MB), forward [20, 30] (1 MB)
+    ChunkTracker.recordChunk('audio', 10, 30, 2 * 1024 * 1024);
+
+    const actual = ChunkTracker.getActualBufferedBytes(mockVideo);
+
+    // Forward checks
+    assert.strictEqual(actual.forwardVideoBytes, 30 * 1024 * 1024, 'Forward video should be exactly 30MB');
+    assert.strictEqual(actual.forwardAudioBytes, 1 * 1024 * 1024, 'Forward audio should be exactly 1MB');
+    assert.strictEqual(actual.forwardTotalBytes, 31 * 1024 * 1024, 'Forward total should be 31MB');
+
+    // Past checks
+    assert.strictEqual(actual.pastVideoBytes, 20 * 1024 * 1024, 'Past video should be exactly 20MB');
+    assert.strictEqual(actual.pastAudioBytes, 1 * 1024 * 1024, 'Past audio should be exactly 1MB');
+    assert.strictEqual(actual.pastTotalBytes, 21 * 1024 * 1024, 'Past total should be 21MB');
+
+    // Total active ledger checks (all unpruned chunks in MSE)
+    // Video: 10 + 10 + 15 + 15 + 10 = 60 MB
+    assert.strictEqual(actual.totalVideoBytes, 60 * 1024 * 1024, 'Total video should be 60MB');
+    assert.strictEqual(actual.totalAudioBytes, 2 * 1024 * 1024, 'Total audio should be 2MB');
+    assert.strictEqual(actual.totalActiveBytes, 62 * 1024 * 1024, 'Total active MSE memory should be 62MB');
+
+    // Getter properties on ChunkTracker
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 60 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 2 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalBytes, 62 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('video'), 60 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('audio'), 2 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes('total'), 62 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getTotalActiveBytes().totalBytes, 62 * 1024 * 1024);
+
+    // Standalone past and forward helpers (with video param and with 'total' track)
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(mockVideo, 'video'), 20 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(mockVideo, 'audio'), 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getPastBufferedBytes(mockVideo, 'total'), 21 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getForwardBufferedBytes(mockVideo, 'video'), 30 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getForwardBufferedBytes(mockVideo, 'audio'), 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getForwardBufferedBytes(mockVideo, 'total'), 31 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.getActualBufferedBytes(mockVideo, 'total'), 31 * 1024 * 1024);
+
+    // ChunkTracker property getters (delegating to mockVideo via DOM query)
+    assert.strictEqual(ChunkTracker.forwardVideoBytes, 30 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.forwardAudioBytes, 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.forwardTotalBytes, 31 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.pastVideoBytes, 20 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.pastAudioBytes, 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.pastTotalBytes, 21 * 1024 * 1024);
+
+    console.log('✓ Total Active Ledger vs Forward & Past Decomposition passed.');
+}
+
+// Test 17: Dynamic Back-Buffer Headroom Shrinkage & Eviction Expansion
+{
+    console.log('\n[Test 17] Testing Dynamic Back-Buffer Headroom Regulation & Eviction Expansion...');
+    ChunkTracker.reset();
+
+    // Baseline rates: 1 MB/s video (8 Mbps), 40 KB/s audio
+    mockVideo.currentTime = 20;
+    mockVideo.buffered._setRanges([[20, 50]]); // 30s forward buffer ahead of currentTime
+
+    // 17.1 Forward only (no past buffer): 30s forward = 30 MB (1 MB/s)
+    ChunkTracker.recordChunk('video', 20, 50, 30 * 1024 * 1024);
+    // Headroom = 125 MB - 30 MB = 95 MB -> 95s allowed additional -> currentBuffered (30s) + 95s = 125s
+    const durNoPast = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durNoPast, 125, `Expected 125s without past buffer, got ${durNoPast}`);
+
+    // 17.2 Add high back-buffer (35 MB retained at [-15, 20], duration 35s = 1 MB/s)
+    ChunkTracker.recordChunk('video', -15, 20, 35 * 1024 * 1024);
+    // Total video = 30 MB + 35 MB = 65 MB
+    // Headroom shrinks: 125 MB - 65 MB = 60 MB -> 60s allowed additional
+    // Target duration shrinks to currentBuffered (30s) + 60s = 90s!
+    const durWithPast = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durWithPast, 90, `Expected headroom to shrink to 90s with back-buffer, got ${durWithPast}`);
+
+    // 17.3 Back-buffer approaches limit (add more past buffer at 1 MB/s, reaching 115 MB total)
+    // 115 MB >= 90% of 125 MB (112.5 MB)
+    ChunkTracker.recordChunk('video', -65, -15, 50 * 1024 * 1024);
+    assert(ChunkTracker.totalVideoBytes >= 115 * 1024 * 1024);
+    const durNearLimit = CoreManager.calculateSafeDuration();
+    // Clamped to currentBuffered (30s)
+    assert.strictEqual(durNearLimit, 30, `Expected duration clamped to currentBuffered (30s) when near limit, got ${durNearLimit}`);
+
+    // 17.4 Back-buffer eviction via ChunkTracker.onRemove:
+    // Bilibili cleaner evicts [-65, 0], removing 50 MB + 15 MB = 65 MB
+    ChunkTracker.onRemove('video', -65, 0);
+    // Total video drops to 50 MB (< 90% of 125 MB)
+    // Headroom expands to 125 MB - 50 MB = 75 MB -> 75s additional
+    // Target duration expands back up to 30s + 75s = 105s!
+    const durAfterEviction = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durAfterEviction, 105, `Expected duration to expand to 105s after eviction, got ${durAfterEviction}`);
+
+    console.log('✓ Dynamic Back-Buffer Headroom Regulation & Eviction Expansion passed.');
+}
+
+// Test 18: Straddling Chunk Boundary Math Precision & Sub-Chunk Ratio Partitioning
+{
+    console.log('\n[Test 18] Testing Straddling Chunk Boundary Math Precision...');
+    ChunkTracker.reset();
+
+    // A single 20-second chunk [10, 30] of 20 MB (1 MB/s)
+    ChunkTracker.recordChunk('video', 10, 30, 20 * 1024 * 1024);
+    mockVideo.buffered._setRanges([[10, 30]]);
+
+    // Subtest 18.1: currentTime = 15 (25% past, 75% forward)
+    mockVideo.currentTime = 15;
+    let act = ChunkTracker.getActualBufferedBytes(mockVideo);
+    assert.strictEqual(act.pastVideoBytes, 5 * 1024 * 1024, 'Past bytes at 15s should be 5MB');
+    assert.strictEqual(act.forwardVideoBytes, 15 * 1024 * 1024, 'Forward bytes at 15s should be 15MB');
+    assert.strictEqual(act.pastVideoBytes + act.forwardVideoBytes, act.totalVideoBytes, 'Sum of past and forward must equal total active bytes');
+
+    // Subtest 18.2: currentTime = 10 (at chunk start: 0% past, 100% forward)
+    mockVideo.currentTime = 10;
+    act = ChunkTracker.getActualBufferedBytes(mockVideo);
+    assert.strictEqual(act.pastVideoBytes, 0, 'Past bytes at start should be 0');
+    assert.strictEqual(act.forwardVideoBytes, 20 * 1024 * 1024, 'Forward bytes at start should be 20MB');
+
+    // Subtest 18.3: currentTime = 30 (at chunk end: 100% past, 0% forward)
+    mockVideo.currentTime = 30;
+    act = ChunkTracker.getActualBufferedBytes(mockVideo);
+    assert.strictEqual(act.pastVideoBytes, 20 * 1024 * 1024, 'Past bytes at end should be 20MB');
+    assert.strictEqual(act.forwardVideoBytes, 0, 'Forward bytes at end should be 0');
+
+    console.log('✓ Straddling Chunk Boundary Math Precision passed.');
+}
+
+// Test 19: UIManager and getStats Dual-Perspective Integration
+{
+    console.log('\n[Test 19] Testing UIManager and getStats Dual-Perspective Integration...');
+    ChunkTracker.reset();
+    mockVideo.currentTime = 10;
+    mockVideo.buffered._setRanges([[0, 40]]);
+    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 10, 40, 30 * 1024 * 1024);
+
+    const stats = CoreManager.getStats();
+    assert.strictEqual(stats.memory.actualPastVideo, 10 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualVideo, 30 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualTotalVideo, 40 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualTotalActive, 40 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualPast, 10 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualPastTotal, 10 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualTotal, 40 * 1024 * 1024);
+    assert.strictEqual(stats.memory.limit, 135 * 1024 * 1024);
+
+    // Verify UI update renders without error
+    UIManager.update();
+    const panel = UIManager.statsPanelRef;
+    assert(panel !== null, 'Stats panel should be created');
+    const memCur = UIManager.cachedStatsElements?.memCur;
+    assert(memCur && memCur.title.includes('前向 30 MB'), 'Tooltip should contain forward memory');
+    assert(memCur.title.includes('回退未清理: 10 MB'), 'Tooltip should contain past memory');
+    assert(memCur.title.includes('MSE总活跃: 40 MB'), 'Tooltip should contain total active memory');
+
+    console.log('✓ UIManager and getStats Dual-Perspective Integration passed.');
+}
+
+// Test 20: Audio Back-Buffer Dynamic Headroom Regulation & Eviction Expansion
+{
+    console.log('\n[Test 20] Testing Audio Back-Buffer Dynamic Headroom Regulation & Eviction Expansion...');
+    ChunkTracker.reset();
+
+    // Baseline rates: Manifest video 8 Mbps (1 MB/s), Audio 320 kbps (40 KB/s)
+    mockVideo.currentTime = 50;
+    mockVideo.buffered._setRanges([[50, 80]]); // 30s forward ahead of 50s
+    // Video has 30 MB forward (1 MB/s, well within 125 MB)
+    ChunkTracker.recordChunk('video', 50, 80, 30 * 1024 * 1024);
+
+    // Subtest 20.1: Forward audio only [50, 80] = 30s * 40 KB/s = 1.2 MB
+    ChunkTracker.recordChunk('audio', 50, 80, 1.2 * 1024 * 1024);
+    // Headroom audio = 9.5 MB - 1.2 MB = 8.3 MB -> 8.3 MB / 40 KB/s = 207.5s -> 30 + 207 = 237s
+    // Video headroom = 125 MB - 30 MB = 95 MB -> 95s -> 30 + 95 = 125s
+    // Min(125s, 237s) = 125s
+    const durNormal = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durNormal, 125);
+
+    // Subtest 20.2: Heavy back-buffer audio accumulated (e.g. 7.5 MB past audio [0, 50])
+    // Total audio = 1.2 MB + 7.5 MB = 8.7 MB
+    // 8.7 MB >= 90% of 9.5 MB (8.55 MB)!
+    ChunkTracker.recordChunk('audio', 0, 50, 7.5 * 1024 * 1024);
+    assert(ChunkTracker.totalAudioBytes >= 8.55 * 1024 * 1024, 'Audio should be near 90% limit');
+    const durAudioNearLimit = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durAudioNearLimit, 30, `Expected duration clamped to currentBuffered (30s) due to audio back-buffer near limit, got ${durAudioNearLimit}`);
+
+    // Subtest 20.3: Back-buffer audio eviction via onRemove
+    // Bilibili cleaner evicts audio past buffer [0, 40] (6 MB)
+    ChunkTracker.onRemove('audio', 0, 40);
+    // Total audio drops to 8.7 - 6.0 = 2.7 MB (< 90% of 9.5 MB)
+    // Audio headroom expands: 9.5 MB - 2.7 MB = 6.8 MB -> 6.8 MB / 40 KB/s = 170s -> 30 + 170 = 200s
+    // Video headroom remains 125s -> safeDuration = min(125, 200) = 125s
+    const durAfterAudioEvict = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durAfterAudioEvict, 125, `Expected duration to rebound to 125s after audio eviction, got ${durAfterAudioEvict}`);
+
+    console.log('✓ Audio Back-Buffer Dynamic Headroom Regulation & Eviction Expansion passed.');
+}
+
+// Test 21: Total Physical Byte Limit (SAFE_BYTE_LIMIT) Closed-Loop Regulation
+{
+    console.log('\n[Test 21] Testing Total Physical Byte Limit (SAFE_BYTE_LIMIT) Closed-Loop Regulation...');
+    ChunkTracker.reset();
+
+    // Rates: Video 1 MB/s, Audio 40 KB/s -> Total Bps = 1,040,000 Bps
+    // Test custom SAFE_BYTE_LIMIT constraint
+    const origSafeLimit = CONFIG.SAFE_BYTE_LIMIT;
+    CONFIG.SAFE_BYTE_LIMIT = 100 * 1024 * 1024; // 100 MiB total limit (90% = 90 MiB)
+
+    mockVideo.currentTime = 30;
+    mockVideo.buffered._setRanges([[30, 60]]); // 30s forward buffer ahead
+
+    // Video: 30s forward = 30 MB, 40 MB past = 70 MB total (< 90% of 125 MB = 112.5 MB)
+    // Audio: 30s forward = 1.2 MB, 3.8 MB past = 5 MB total (< 90% of 9.5 MB = 8.55 MB)
+    // Total Active: 70 MB + 5 MB = 75 MB (< 90% of 100 MB = 90 MB)
+    ChunkTracker.recordChunk('video', 30, 60, 30 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 0, 30, 40 * 1024 * 1024);
+    ChunkTracker.recordChunk('audio', 30, 60, 1.2 * 1024 * 1024);
+    ChunkTracker.recordChunk('audio', 0, 30, 3.8 * 1024 * 1024);
+
+    assert(ChunkTracker.totalVideoBytes < CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90, 'Video alone is below 90%');
+    assert(ChunkTracker.totalAudioBytes < CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90, 'Audio alone is below 90%');
+    assert(ChunkTracker.totalBytes < CONFIG.SAFE_BYTE_LIMIT * 0.90, 'Total active is below 90%');
+
+    // Total headroom: 100 MB - 75 MB = 25 MB (26,214,400 B)
+    // Most recent chunks yield rolling rates: video 40MB/30s = 1,398,101 Bps, audio 3.8MB/30s = 132,820 Bps
+    // effectiveTotalBps = 1,530,920 Bps
+    // allowedTotalSec = 26,214,400 / 1,530,920 ≈ 17.12s -> Math.floor(30 + 17.12) = 47s
+    // Video headroom alone: (125 - 70) MB / 1.398 MB/s = 39.3s -> 30 + 39 = 69s
+    // Safe duration governed by total headroom: min(69s, 47s) = 47s!
+    const durTotalHeadroom = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durTotalHeadroom, 47, `Expected duration throttled by total headroom to 47s, got ${durTotalHeadroom}`);
+
+    // Subtest 21.2: Add past chunk pushing total active to 92 MB (>= 90% of 100 MB = 90 MB)
+    // Video: +17 MB past = 87 MB (< 112.5 MB)
+    // Audio: 5 MB (< 8.55 MB)
+    // Total: 87 + 5 = 92 MB >= 90 MB!
+    ChunkTracker.recordChunk('video', -20, 0, 17 * 1024 * 1024);
+    assert(ChunkTracker.totalVideoBytes < CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90, 'Video is still below 90% of 125MB');
+    assert(ChunkTracker.totalAudioBytes < CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90, 'Audio is still below 90% of 9.5MB');
+    assert(ChunkTracker.totalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90, 'Total active reaches 90% of SAFE_BYTE_LIMIT');
+
+    const durTotalNearLimit = CoreManager.calculateSafeDuration();
+    assert.strictEqual(durTotalNearLimit, 30, `Expected duration clamped to currentBuffered (30s) due to total near limit, got ${durTotalNearLimit}`);
+
+    // Restore CONFIG.SAFE_BYTE_LIMIT
+    CONFIG.SAFE_BYTE_LIMIT = origSafeLimit;
+    console.log('✓ Total Physical Byte Limit (SAFE_BYTE_LIMIT) Closed-Loop Regulation passed.');
+}
+
+// Test 22: UIManager.updateControlBarBadge Lifecycle & Tooltip Rendering
+{
+    console.log('\n[Test 22] Testing UIManager.updateControlBarBadge Lifecycle & Tooltip...');
+    ChunkTracker.reset();
+
+    mockVideo.currentTime = 10;
+    mockVideo.buffered._setRanges([[0, 40]]);
+    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 10, 40, 30 * 1024 * 1024);
+
+    const stats = CoreManager.getStats();
+    UIManager.updateControlBarBadge(stats);
+
+    const badge = UIManager.badgeRef;
+    assert(badge !== null, 'Badge element should be created');
+    assert.strictEqual(badge.id, 'bili-buffer-badge');
+    assert.strictEqual(UIManager.badgeTextRef.textContent, `⚡${Utils.formatTime(stats.time.current)}`);
+
+    // Verify title text contains forward, past, and total active memory
+    assert(badge.title.includes('前向 30 MB'), 'Badge title should contain forward size');
+    assert(badge.title.includes('回退 10 MB'), 'Badge title should contain past size');
+    assert(badge.title.includes('总活跃 40 MB'), 'Badge title should contain total active size');
+    assert(badge.title.includes('上限 135 MB'), 'Badge title should contain memory limit');
+
+    // Test badge when past memory is 0
+    ChunkTracker.onRemove('video', 0, 10);
+    const statsNoPast = CoreManager.getStats();
+    UIManager.updateControlBarBadge(statsNoPast);
+    assert(badge.title.includes('物理实测: 30 MB (总活跃 30 MB)'), 'Badge title without past should format cleanly');
+
+    console.log('✓ UIManager.updateControlBarBadge Lifecycle & Tooltip passed.');
+}
+
 // Test 8: End-to-end MSE Hook interception
 async function testMSEHooks() {
     console.log('\n[Test 8] Testing live MSE hook execution with MockMediaSource...');
@@ -574,7 +917,7 @@ async function testMSEHooks() {
 
 testMSEHooks().then(() => {
     console.log('\n========================================');
-    console.log('🎉 ALL 15 UNIT & EDGE CASE TESTS PASSED!');
+    console.log('🎉 ALL 22 UNIT & EDGE CASE TESTS PASSED!');
     console.log('========================================');
     process.exit(0);
 }).catch(err => {

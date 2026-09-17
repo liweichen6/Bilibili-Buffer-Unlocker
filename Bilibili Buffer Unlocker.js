@@ -27,9 +27,9 @@
     const CONFIG = {
         MIN_TIME_LIMIT: 20,                 // 最低缓冲时间下限 (秒)
         MAX_TIME_LIMIT: 600,                // 缓冲时间上限 600秒 (10分钟)
-        SAFE_BYTE_LIMIT: 120 * 1024 * 1024, // 综合安全内存空间上限 120MB (展示基准)
-        SAFE_VIDEO_BYTE_LIMIT: 110 * 1024 * 1024, // 视频安全内存上限 110 MiB (Chromium硬限制 150 MiB)
-        SAFE_AUDIO_BYTE_LIMIT: 8 * 1024 * 1024,   // 音频安全内存上限 8 MiB (Chromium硬限制 12 MiB)
+        SAFE_BYTE_LIMIT: 135 * 1024 * 1024, // 综合安全内存空间上限 135MB (展示基准)
+        SAFE_VIDEO_BYTE_LIMIT: 125 * 1024 * 1024, // 视频安全内存上限 125 MiB (Chromium硬限制 150 MiB，保留 25 MiB 冗余缓冲区)
+        SAFE_AUDIO_BYTE_LIMIT: Math.round(9.5 * 1024 * 1024), // 音频安全内存上限 9.5 MiB (Chromium硬限制 12 MiB，保留 2.5 MiB 冗余缓冲区)
         CHECK_INTERVAL: 3000,               // 内核优化轮询间隔 (毫秒)
         UI_REFRESH_RATE: 1000,              // UI 刷新间隔 (毫秒)
         HYSTERESIS_DELTA: 5,                // 缓冲目标调整容差 (秒，防频繁抖动)
@@ -112,6 +112,35 @@
         audioLedger: [],
         MAX_LEDGER_ENTRIES: 500,
         _seq: 0,
+
+        // 便捷只读属性：获取当前总活跃/前向/回退物理内存
+        get totalVideoBytes() {
+            return ChunkTracker.getTotalActiveBytes('video');
+        },
+        get totalAudioBytes() {
+            return ChunkTracker.getTotalActiveBytes('audio');
+        },
+        get totalBytes() {
+            return ChunkTracker.getTotalActiveBytes('total');
+        },
+        get forwardVideoBytes() {
+            return ChunkTracker.getActualBufferedBytes(null, 'video');
+        },
+        get forwardAudioBytes() {
+            return ChunkTracker.getActualBufferedBytes(null, 'audio');
+        },
+        get forwardTotalBytes() {
+            return ChunkTracker.getActualBufferedBytes(null, 'total');
+        },
+        get pastVideoBytes() {
+            return ChunkTracker.getPastBufferedBytes(null, 'video');
+        },
+        get pastAudioBytes() {
+            return ChunkTracker.getPastBufferedBytes(null, 'audio');
+        },
+        get pastTotalBytes() {
+            return ChunkTracker.getPastBufferedBytes(null, 'total');
+        },
 
         // 辅助：提取并标准化 TimeRanges 数组
         snapshotRanges: (buffered) => {
@@ -282,27 +311,158 @@
             ChunkTracker.pruneInterval(ledger, start, end);
         },
 
-        // 计算当前播放点向前连续缓冲的真实物理内存
-        getActualBufferedBytes: (video, track = null) => {
+        // 1. 计算总活跃物理内存 (Chromium MSE 实际持有的全部未被裁剪分片载荷)
+        getTotalActiveBytes: (track = null) => {
             try {
-                const v = video || document.querySelector('video');
+                const sumLedger = (ledger) => {
+                    if (!ledger || ledger.length === 0) return 0;
+                    let sum = 0;
+                    for (let i = 0; i < ledger.length; i++) {
+                        sum += (ledger[i].bytes || 0);
+                    }
+                    return sum;
+                };
+
+                const totalVideoBytes = sumLedger(ChunkTracker.videoLedger);
+                const totalAudioBytes = sumLedger(ChunkTracker.audioLedger);
+                const totalBytes = totalVideoBytes + totalAudioBytes;
+
+                if (track === 'video') return totalVideoBytes;
+                if (track === 'audio') return totalAudioBytes;
+                if (track === 'total') return totalBytes;
+
+                return {
+                    totalVideoBytes,
+                    totalAudioBytes,
+                    totalBytes,
+                    videoBytes: totalVideoBytes,
+                    audioBytes: totalAudioBytes,
+                    valueOf() { return this.totalBytes; }
+                };
+            } catch {
+                if (track === 'video') return 0;
+                if (track === 'audio') return 0;
+                if (track === 'total') return 0;
+                return { totalVideoBytes: 0, totalAudioBytes: 0, totalBytes: 0, videoBytes: 0, audioBytes: 0, valueOf() { return 0; } };
+            }
+        },
+
+        // 2. 计算当前播放点后方 (currentTime 之前) 尚未被 B 站清理器裁剪的回退物理内存
+        getPastBufferedBytes: (video = null, track = null) => {
+            try {
+                const v = video || (typeof document !== 'undefined' ? document.querySelector('video') : null);
                 if (!v || !Number.isFinite(v.currentTime)) {
                     if (track === 'video') return 0;
                     if (track === 'audio') return 0;
-                    return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                    if (track === 'total') return 0;
+                    return { pastVideoBytes: 0, pastAudioBytes: 0, pastTotalBytes: 0, videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                }
+
+                const currentTime = v.currentTime;
+                const calcPastBytes = (ledger) => {
+                    if (!ledger || ledger.length === 0) return 0;
+                    let bytes = 0;
+                    for (let i = 0; i < ledger.length; i++) {
+                        const c = ledger[i];
+                        if (c.end <= currentTime) {
+                            bytes += (c.bytes || 0);
+                        } else if (c.start < currentTime) {
+                            const pastDur = Math.max(0, currentTime - c.start);
+                            if (pastDur > 0 && c.duration > 0) {
+                                const ratio = Math.min(1, pastDur / c.duration);
+                                bytes += Math.round(c.bytes * ratio);
+                            }
+                        }
+                    }
+                    return bytes;
+                };
+
+                const pastVideoBytes = calcPastBytes(ChunkTracker.videoLedger);
+                const pastAudioBytes = calcPastBytes(ChunkTracker.audioLedger);
+                const pastTotalBytes = pastVideoBytes + pastAudioBytes;
+
+                if (track === 'video') return pastVideoBytes;
+                if (track === 'audio') return pastAudioBytes;
+                if (track === 'total') return pastTotalBytes;
+
+                return {
+                    pastVideoBytes,
+                    pastAudioBytes,
+                    pastTotalBytes,
+                    videoBytes: pastVideoBytes,
+                    audioBytes: pastAudioBytes,
+                    totalBytes: pastTotalBytes,
+                    valueOf() { return this.pastTotalBytes; }
+                };
+            } catch {
+                if (track === 'video') return 0;
+                if (track === 'audio') return 0;
+                if (track === 'total') return 0;
+                return { pastVideoBytes: 0, pastAudioBytes: 0, pastTotalBytes: 0, videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+            }
+        },
+
+        // 3. 计算当前播放点向前连续缓冲的真实物理内存，并提供总活跃、回退与前向完整透视
+        getActualBufferedBytes: (video = null, track = null) => {
+            try {
+                const totalActive = ChunkTracker.getTotalActiveBytes();
+                const totalVideoBytes = totalActive.totalVideoBytes;
+                const totalAudioBytes = totalActive.totalAudioBytes;
+                const totalActiveBytes = totalActive.totalBytes;
+
+                const v = video || (typeof document !== 'undefined' ? document.querySelector('video') : null);
+                if (!v || !Number.isFinite(v.currentTime)) {
+                    if (track === 'video') return 0;
+                    if (track === 'audio') return 0;
+                    if (track === 'total') return 0;
+                    return {
+                        videoBytes: 0,
+                        audioBytes: 0,
+                        totalBytes: 0,
+                        forwardVideoBytes: 0,
+                        forwardAudioBytes: 0,
+                        forwardTotalBytes: 0,
+                        pastVideoBytes: 0,
+                        pastAudioBytes: 0,
+                        pastTotalBytes: 0,
+                        totalVideoBytes,
+                        totalAudioBytes,
+                        totalActiveBytes,
+                        valueOf() { return 0; }
+                    };
                 }
 
                 const currentTime = v.currentTime;
                 const range = Utils.getForwardBufferedRange(v);
                 const forwardEnd = range ? range.end : currentTime;
 
+                const past = ChunkTracker.getPastBufferedBytes(v);
+                const pastVideoBytes = past.pastVideoBytes;
+                const pastAudioBytes = past.pastAudioBytes;
+                const pastTotalBytes = past.pastTotalBytes;
+
                 if (forwardEnd <= currentTime) {
                     if (track === 'video') return 0;
                     if (track === 'audio') return 0;
-                    return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                    if (track === 'total') return 0;
+                    return {
+                        videoBytes: 0,
+                        audioBytes: 0,
+                        totalBytes: 0,
+                        forwardVideoBytes: 0,
+                        forwardAudioBytes: 0,
+                        forwardTotalBytes: 0,
+                        pastVideoBytes,
+                        pastAudioBytes,
+                        pastTotalBytes,
+                        totalVideoBytes,
+                        totalAudioBytes,
+                        totalActiveBytes,
+                        valueOf() { return 0; }
+                    };
                 }
 
-                const calcTrackBytes = (ledger) => {
+                const calcForwardTrackBytes = (ledger) => {
                     if (!ledger || ledger.length === 0) return 0;
                     let bytes = 0;
                     for (let i = 0; i < ledger.length; i++) {
@@ -319,24 +479,60 @@
                     return bytes;
                 };
 
-                const videoBytes = calcTrackBytes(ChunkTracker.videoLedger);
-                const audioBytes = calcTrackBytes(ChunkTracker.audioLedger);
-                const totalBytes = videoBytes + audioBytes;
+                const forwardVideoBytes = calcForwardTrackBytes(ChunkTracker.videoLedger);
+                const forwardAudioBytes = calcForwardTrackBytes(ChunkTracker.audioLedger);
+                const forwardTotalBytes = forwardVideoBytes + forwardAudioBytes;
 
-                if (track === 'video') return videoBytes;
-                if (track === 'audio') return audioBytes;
+                if (track === 'video') return forwardVideoBytes;
+                if (track === 'audio') return forwardAudioBytes;
+                if (track === 'total') return forwardTotalBytes;
 
                 return {
-                    videoBytes,
-                    audioBytes,
-                    totalBytes,
+                    // 前向物理内存 (兼容历史字段 videoBytes, audioBytes, totalBytes)
+                    videoBytes: forwardVideoBytes,
+                    audioBytes: forwardAudioBytes,
+                    totalBytes: forwardTotalBytes,
+                    forwardVideoBytes,
+                    forwardAudioBytes,
+                    forwardTotalBytes,
+
+                    // 回退未清理物理内存 (currentTime 之前)
+                    pastVideoBytes,
+                    pastAudioBytes,
+                    pastTotalBytes,
+
+                    // 全局活跃账本物理内存 (Chromium MSE 实际持有的全部未被清理分片)
+                    totalVideoBytes,
+                    totalAudioBytes,
+                    totalActiveBytes,
+
                     valueOf() { return this.totalBytes; }
                 };
             } catch {
                 if (track === 'video') return 0;
                 if (track === 'audio') return 0;
-                return { videoBytes: 0, audioBytes: 0, totalBytes: 0, valueOf() { return 0; } };
+                if (track === 'total') return 0;
+                return {
+                    videoBytes: 0,
+                    audioBytes: 0,
+                    totalBytes: 0,
+                    forwardVideoBytes: 0,
+                    forwardAudioBytes: 0,
+                    forwardTotalBytes: 0,
+                    pastVideoBytes: 0,
+                    pastAudioBytes: 0,
+                    pastTotalBytes: 0,
+                    totalVideoBytes: 0,
+                    totalAudioBytes: 0,
+                    totalActiveBytes: 0,
+                    valueOf() { return 0; }
+                };
             }
+        },
+
+        // 前向物理缓冲获取别名
+        getForwardBufferedBytes: (video = null, track = null) => {
+            return ChunkTracker.getActualBufferedBytes(video, track);
         },
 
         // 计算最近分片的滑动窗口移动平均码率 (Bytes/s)
@@ -645,31 +841,49 @@
 
             let safeSeconds = Math.min(safeAudioSec, safeVideoSec, CONFIG.MAX_TIME_LIMIT);
 
-            // 闭环物理内存节流控制 (Closed-Loop Physical Memory Regulation)
+            // 闭环双视角物理内存调控 (Closed-Loop Dual-Perspective Regulation)
             const video = document.querySelector('video');
             const actual = ChunkTracker.getActualBufferedBytes(video);
-            const actualVideoBytes = actual?.videoBytes || 0;
-            const actualAudioBytes = actual?.audioBytes || 0;
+            const forwardVideoBytes = actual?.forwardVideoBytes ?? actual?.videoBytes ?? 0;
+            const forwardAudioBytes = actual?.forwardAudioBytes ?? actual?.audioBytes ?? 0;
+            const forwardTotalBytes = actual?.forwardTotalBytes ?? actual?.totalBytes ?? (forwardVideoBytes + forwardAudioBytes);
+            const totalVideoBytes = actual?.totalVideoBytes ?? forwardVideoBytes;
+            const totalAudioBytes = actual?.totalAudioBytes ?? forwardAudioBytes;
+            const totalActiveBytes = actual?.totalActiveBytes ?? (totalVideoBytes + totalAudioBytes);
             const currentBuffered = CoreManager.getBufferedAhead(video);
 
-            const isVideoNearLimit = actualVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90;
-            const isAudioNearLimit = actualAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90;
+            // 检查全局总活跃物理内存、单轨总活跃与前向物理内存是否触及安全阈值的 90% 红线
+            const isVideoNearLimit = totalVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90 ||
+                                     forwardVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90;
+            const isAudioNearLimit = totalAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90 ||
+                                     forwardAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90;
+            const isTotalNearLimit = (CONFIG.SAFE_BYTE_LIMIT > 0) && (
+                                     totalActiveBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90 ||
+                                     forwardTotalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90
+            );
 
-            if (isVideoNearLimit || isAudioNearLimit) {
-                // 当音视频任一物理内存达到安全上限 90% 时，强制限制目标缓冲至当前缓冲量，停止拉取新分片
+            if (isVideoNearLimit || isAudioNearLimit || isTotalNearLimit) {
+                // 当音视频任一物理内存达到安全上限 90% 时，强制限制目标缓冲至当前缓冲量，停止拉取新分片防止触发 GC 截断
                 safeSeconds = Math.min(safeSeconds, Math.max(CONFIG.MIN_TIME_LIMIT, Math.floor(currentBuffered)));
             } else {
-                // 基于音视频各自剩余物理配额的平滑缓冲节流
+                // 基于总活跃内存扣除后的动态剩余净空 (Headroom) 平滑调节允许的前向缓冲时长：
+                // remainingHeadroom = max(0, SAFE_LIMIT - totalBytes)
+                // 当回退缓冲较多时，自动压缩前向缓冲净空；回退被 B 站清理后，净空自动释放扩充
                 let maxAllowedSec = CONFIG.MAX_TIME_LIMIT;
-                if (actualVideoBytes > 0 && effectiveVideoBps > 0) {
-                    const remainingVideoBytes = Math.max(0, CONFIG.SAFE_VIDEO_BYTE_LIMIT - actualVideoBytes);
-                    const allowedVideoSec = remainingVideoBytes / effectiveVideoBps;
+                if (totalVideoBytes > 0 && effectiveVideoBps > 0) {
+                    const remainingVideoHeadroom = Math.max(0, CONFIG.SAFE_VIDEO_BYTE_LIMIT - totalVideoBytes);
+                    const allowedVideoSec = remainingVideoHeadroom / effectiveVideoBps;
                     maxAllowedSec = Math.min(maxAllowedSec, Math.floor(currentBuffered + allowedVideoSec));
                 }
-                if (actualAudioBytes > 0 && effectiveAudioBps > 0) {
-                    const remainingAudioBytes = Math.max(0, CONFIG.SAFE_AUDIO_BYTE_LIMIT - actualAudioBytes);
-                    const allowedAudioSec = remainingAudioBytes / effectiveAudioBps;
+                if (totalAudioBytes > 0 && effectiveAudioBps > 0) {
+                    const remainingAudioHeadroom = Math.max(0, CONFIG.SAFE_AUDIO_BYTE_LIMIT - totalAudioBytes);
+                    const allowedAudioSec = remainingAudioHeadroom / effectiveAudioBps;
                     maxAllowedSec = Math.min(maxAllowedSec, Math.floor(currentBuffered + allowedAudioSec));
+                }
+                if (CONFIG.SAFE_BYTE_LIMIT > 0 && totalActiveBytes > 0 && effectiveTotalBps > 0) {
+                    const remainingTotalHeadroom = Math.max(0, CONFIG.SAFE_BYTE_LIMIT - totalActiveBytes);
+                    const allowedTotalSec = remainingTotalHeadroom / effectiveTotalBps;
+                    maxAllowedSec = Math.min(maxAllowedSec, Math.floor(currentBuffered + allowedTotalSec));
                 }
                 safeSeconds = Math.min(safeSeconds, Math.max(CONFIG.MIN_TIME_LIMIT, maxAllowedSec));
             }
@@ -719,8 +933,21 @@
 
                     const video = document.querySelector('video');
                     const actual = ChunkTracker.getActualBufferedBytes(video);
-                    const isNearLimit = (actual?.videoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
-                                        (actual?.audioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90);
+                    const totalVideoBytes = actual?.totalVideoBytes ?? actual?.videoBytes ?? 0;
+                    const totalAudioBytes = actual?.totalAudioBytes ?? actual?.audioBytes ?? 0;
+                    const forwardVideoBytes = actual?.forwardVideoBytes ?? actual?.videoBytes ?? 0;
+                    const forwardAudioBytes = actual?.forwardAudioBytes ?? actual?.audioBytes ?? 0;
+                    const totalActiveBytes = actual?.totalActiveBytes ?? (totalVideoBytes + totalAudioBytes);
+                    const forwardTotalBytes = actual?.forwardTotalBytes ?? actual?.totalBytes ?? (forwardVideoBytes + forwardAudioBytes);
+
+                    const isNearLimit = (totalVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
+                                        (forwardVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
+                                        (totalAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90) ||
+                                        (forwardAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90) ||
+                                        (CONFIG.SAFE_BYTE_LIMIT > 0 && (
+                                            totalActiveBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90 ||
+                                            forwardTotalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90
+                                        ));
                     const isUrgentDownward = isNearLimit && (targetSeconds < effectiveSetting);
 
                     // 容差判定：当当前设置与目标不一致时，在未设置、升级至解限(>=30s)、差值超过容差死区或处于物理防爆紧急下调时更新
@@ -807,15 +1034,22 @@
                 const bufferedAhead = CoreManager.getBufferedAhead(video);
                 const finalTargetTime = Number.isFinite(remainingTime) ? Math.min(baseTargetTime, remainingTime) : baseTargetTime;
 
-                // 获取实测物理分片内存
+                // 获取实测物理分片内存 (双视角：前向连续 + 回退未清理 + 总活跃账本)
                 const actual = ChunkTracker.getActualBufferedBytes(video);
-                const actualTotal = actual?.totalBytes || 0;
-                const actualVideo = actual?.videoBytes || 0;
-                const actualAudio = actual?.audioBytes || 0;
-                const hasActual = actualTotal > 0;
+                const forwardTotal = actual?.forwardTotalBytes ?? actual?.totalBytes ?? 0;
+                const forwardVideo = actual?.forwardVideoBytes ?? actual?.videoBytes ?? 0;
+                const forwardAudio = actual?.forwardAudioBytes ?? actual?.audioBytes ?? 0;
+                const pastTotal = actual?.pastTotalBytes ?? 0;
+                const pastVideo = actual?.pastVideoBytes ?? 0;
+                const pastAudio = actual?.pastAudioBytes ?? 0;
+                const totalActive = actual?.totalActiveBytes ?? forwardTotal;
+                const totalVideo = actual?.totalVideoBytes ?? forwardVideo;
+                const totalAudio = actual?.totalAudioBytes ?? forwardAudio;
+
+                const hasActual = totalActive > 0 || forwardTotal > 0;
 
                 if (effectiveTotalBps <= 0 && hasActual && bufferedAhead > 0) {
-                    effectiveTotalBps = actualTotal / bufferedAhead;
+                    effectiveTotalBps = (forwardTotal > 0 ? forwardTotal : totalActive) / bufferedAhead;
                 }
 
                 const bps = effectiveTotalBps;
@@ -830,9 +1064,20 @@
                         current: bufferedAhead * bps,
                         target: finalTargetTime * bps,
                         limit: CONFIG.SAFE_BYTE_LIMIT,
-                        actualCurrent: actualTotal,
-                        actualVideo: actualVideo,
-                        actualAudio: actualAudio,
+                        // 前向物理内存
+                        actualCurrent: forwardTotal,
+                        actualVideo: forwardVideo,
+                        actualAudio: forwardAudio,
+                        // 回退未清理物理内存 (currentTime 之前)
+                        actualPast: pastTotal,
+                        actualPastTotal: pastTotal,
+                        actualPastVideo: pastVideo,
+                        actualPastAudio: pastAudio,
+                        // 全局活跃账本物理内存 (Chromium MSE 全局物理载荷)
+                        actualTotal: totalActive,
+                        actualTotalActive: totalActive,
+                        actualTotalVideo: totalVideo,
+                        actualTotalAudio: totalAudio,
                         hasActual: hasActual
                     },
                     bps,
@@ -928,7 +1173,12 @@
             if (stats.memory.hasActual) {
                 el.memCur.textContent = Utils.formatSize(stats.memory.actualCurrent);
                 if (el.memActualTag) el.memActualTag.style.display = 'inline';
-                el.memCur.title = `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (估算: ${Utils.formatSize(stats.memory.current)})`;
+                let tooltip = `物理实测: 前向 ${Utils.formatSize(stats.memory.actualCurrent)} (V:${Utils.formatSize(stats.memory.actualVideo)} A:${Utils.formatSize(stats.memory.actualAudio)})`;
+                if (stats.memory.actualPastTotal > 0) {
+                    tooltip += ` | 回退未清理: ${Utils.formatSize(stats.memory.actualPastTotal)}`;
+                }
+                tooltip += ` | MSE总活跃: ${Utils.formatSize(stats.memory.actualTotalActive)} / 上限 ${Utils.formatSize(stats.memory.limit)} (估算: ${Utils.formatSize(stats.memory.current)})`;
+                el.memCur.title = tooltip;
             } else {
                 el.memCur.textContent = Utils.formatSize(stats.memory.current);
                 if (el.memActualTag) el.memActualTag.style.display = 'none';
@@ -1058,10 +1308,17 @@
                 UIManager.badgeTextRef.textContent = `⚡${Utils.formatTime(stats.time.current)}`;
             }
 
-            const memText = stats.memory.hasActual
-                ? `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (估算: ${Utils.formatSize(stats.memory.current)})`
-                : `内存估算: ${Utils.formatSize(stats.memory.current)}`;
-            badge.title = `已缓冲: ${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memText} / ${Utils.formatSize(stats.memory.limit)} (点击手动触发解限)`;
+            let memText;
+            if (stats.memory.hasActual) {
+                if (stats.memory.actualPastTotal > 0) {
+                    memText = `物理实测: 前向 ${Utils.formatSize(stats.memory.actualCurrent)} + 回退 ${Utils.formatSize(stats.memory.actualPastTotal)} (总活跃 ${Utils.formatSize(stats.memory.actualTotalActive)})`;
+                } else {
+                    memText = `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (总活跃 ${Utils.formatSize(stats.memory.actualTotalActive)})`;
+                }
+            } else {
+                memText = `内存估算: ${Utils.formatSize(stats.memory.current)}`;
+            }
+            badge.title = `已缓冲: ${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memText} / 上限 ${Utils.formatSize(stats.memory.limit)} (点击手动触发解限)`;
         },
 
         update: () => {

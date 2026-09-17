@@ -31,17 +31,20 @@
 ## ✨ 核心特性 / Features
 
 - 🚀 **突破时长限制**：默认缓冲时长由官方 20s 提升至 **600s（10 分钟）**，网络不稳定或高倍速播放时平滑无阻。
-- 📦 **实时 MSE 分片追踪引擎 (Real-Time Chunk Tracking)**：
+- 📦 **全量活跃物理分片追踪引擎 (Total Active Ledger & Chunk Tracking)**：
   - 底层拦截 `MediaSource.prototype.addSourceBuffer`、`SourceBuffer.prototype.appendBuffer` 与 `SourceBuffer.prototype.remove`；
   - 毫秒级提取真实分片字节大小（`data.byteLength`）、呈现时间戳区间 $[start, end]$ 与片段时长 $\Delta t$；
-  - 维护内存物理分片账本，动态计算当前播放点向前连续缓冲的**真实物理内存占用**与滑动窗口移动平均码率（Rolling Bitrate）。
-- 🧠 **闭环自适应流控与音视频双轨物理防爆 (Closed-Loop Memory Budgeting)**：
+  - 建立**双视角物理账本**：全息透视「前向连续缓冲（Forward）」、「回退未释放缓存（Past）」与「整个 MSE 活跃总账本（Total Active）」，杜绝播放器历史缓存引发的 Chromium MSE 内存盲区；
+  - 动态计算滑动窗口移动平均码率（Rolling Bitrate）并支持秒级感知。
+- 🧠 **闭环自适应流控与动态净空调节 (Closed-Loop Headroom Regulation)**：
   - 码率浪涌自适应对齐：$\text{effectiveVideoBps} = \max(\text{manifestRate},\; \text{rollingRate})$，实时捕获 3D 游戏（如 `BV1oZeA6fERD`）、特效爆炸等极端 VBR 峰值；
-  - 音视频双轨 90% 物理内存防爆熔断：分别实时监控视频（110 MiB）与音频（8 MiB）实测物理载荷，任一轨道逼近 90%（99 MiB / 7.2 MiB）即自适应收窄缓冲目标至当前缓冲量，停止新分片请求，彻底杜绝冲破 Chromium 150 MiB 视频与 12 MiB 音频阈值引发的 GC 驱逐与重缓冲崩溃；
+  - **基于回退缓冲的动态净空调控**：$\text{remainingHeadroom} = \max(0, \text{SAFE\_LIMIT} - \text{totalBytes})$。当回退缓冲积压时自适应压缩前向配额；当 B 站内核清理回退缓冲时，前向配额自动扩容至满载安全水位；
+  - **安全配额提升**：视频安全上限安全推升至 **125 MiB**（Chromium硬限制 150 MiB，保留 25 MiB 冗余），音频上限提升至 **9.5 MiB**（硬限制 12 MiB），综合安全上限 **135 MiB**；
+  - 音视频双轨 90% 物理内存防爆熔断：分别监控视频（112.5 MiB）与音频（8.55 MiB）实测物理载荷，任一轨道逼近 90% 即自适应熔断收窄缓冲目标至当前缓冲量，停止新分片请求，彻底杜绝冲破 Chromium 150 MiB 视频与 12 MiB 音频阈值引发的 GC 驱逐与重缓冲崩溃；
   - 采样抗抖与平滑降级：滑动窗口设置 1.0s 最小有效采样门槛，滤除单关键帧产生的瞬时虚高噪点；冷启动未收集到分片时无缝回退至静态清单双配额模型；首屏分片安全持久化，仅在切集换源时触发物理账本重置。
 - 🛡️ **双配额动态安全内存上限（智能限流）**：
   - 自动从播放器元数据独立提取音视频码率 (`mediaInfo.videoDataRate` 与 `mediaInfo.audioDataRate`)。
-  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **110 MiB**（硬限制 150 MiB），音频轨安全上限 **8 MiB**（硬限制 12 MiB），双轨取交集保底，杜绝单轨内存溢出与 GC 驱逐。
+  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **125 MiB**（硬限制 150 MiB），音频轨安全上限 **9.5 MiB**（硬限制 12 MiB），双轨取交集保底，杜绝单轨内存溢出与 GC 驱逐。
 - 🔬 **真·连续缓冲计算（Range-Containment）**：
   - 准确遍历 `HTMLMediaElement.buffered` 的离散区间，智能聚合微小缝隙（$\le 0.25\text{s}$）的连续分片，精准匹配当前进度点。
   - 彻底解决用户回拖进度条（Seek）或分段拉流时缓冲区虚标与假死问题。
@@ -163,13 +166,37 @@ $$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVid
      $$\text{rollingVideoBps} = \frac{\sum \text{chunk.bytes}}{\sum \text{chunk.duration}}$$
    - 自适应捕获浪涌：$\text{effectiveVideoBps} = \max(\text{manifestVideoBps},\; \text{rollingVideoBps})$。当高复杂度场景爆发时，安全时长即刻动态收缩。
 3. **音视频双轨 90% 闭环物理内存防爆熔断**：
-   - 当实测前向视频物理内存逼近 110 MiB 安全线（$\ge 90\% \approx 99\text{ MiB}$）或音频物理内存逼近 8 MiB 安全线（$\ge 90\% \approx 7.2\text{ MiB}$）时，目标缓冲秒数自动熔断封顶至当前已缓冲量：
+   - 实时监控视频（125 MiB）与音频（9.5 MiB）实测物理载荷，当总活跃或前向物理内存逼近安全线（$\ge 90\%$，即视频 112.5 MiB / 音频 8.55 MiB）时，目标缓冲秒数自动熔断封顶至当前已缓冲量：
      $$\text{safeSeconds} = \min\left(\text{safeSeconds},\; \max(20,\; \lfloor\text{currentBuffered}\rfloor)\right)$$
    - 强制播放器停止拉取新分片，给 Chromium 预留充足的绝对安全余量，直至播放推进、内存释放后才继续预载，从物理层面彻底根除单轨超限引发的 GC 缓存重设。
 4. **高精差分与首屏分片安全机制**：
    - 支持双向边界扩展匹配，杜绝清晰度切换或跨度关键帧替换导致分片漏统；
    - 区分初始挂载与真实换源，首屏捕获分片安全持久化；
    - 统一提取器容错 DASH 流首帧 0.5s 呈现偏移，全场景精准捕捉前向有效缓冲。
+
+### 5. 全量活跃总账本与回退缓冲动态净空调节 (Total Active Ledger & Dynamic Back-Buffer Regulation)
+
+#### 历史盲区剖析：为什么仅统计前向缓冲依然存在隐患？
+在单纯前向缓冲调控模型中，系统仅计算当前播放位置之后的内存载荷（`end > currentTime`）。
+然而，**Chromium 内核的 MSE GC 内存配额判定（`SourceBufferStream::GarbageCollectIfNeeded`）是针对整个流中所有未被剔除的分片全局生效的**，其既包括前向未播放分片，也包括当前播放位置之前的**回退历史分片（Past Buffer）**。
+
+在 B 站播放器实际运行中，为支持用户平滑微拖后退，内核通常会保留 10~20 秒的历史回退缓冲（在 4K 超高清下体积可达 15~25 MB）。
+- **盲区风险**：若前向缓冲允许占用 125 MiB，而回退缓冲积压了 25 MiB，Chromium 内部持有的真实物理内存已达 $125 + 25 = 150\text{ MiB}$！
+- 此时若再拉取新分片，直接冲破 Chromium 150 MiB 视频硬顶，触发底层强制 GC 清空，导致前向缓冲大面积崩塌。
+
+#### 核心突破：全量物理账本与动态净空呼吸流控
+v3.3-beta 实现了全量活跃物理账本追踪与基于回退状态的动态净空流控：
+1. **双视角全息物理核算**：
+   $$\text{totalVideoBytes} = \sum_{\text{videoLedger}} \text{chunk.bytes} = \text{pastVideoBytes} + \text{forwardVideoBytes} + \text{unevictedChunks}$$
+   对每一分片精确按时序切分为回退段 $[start, \min(end, currentTime)]$ 与前向段 $[\max(start, currentTime), end]$，实时计算全局真实占用。
+2. **基于总活跃内存的动态净空公式**：
+   $$\text{remainingVideoHeadroom} = \max\left(0, \text{SAFE\_VIDEO\_BYTE\_LIMIT} - \text{totalVideoBytes}\right)$$
+   $$\text{allowedForwardDuration} = \text{currentBuffered} + \frac{\text{remainingVideoHeadroom}}{\text{effectiveVideoBps}}$$
+3. **动态呼吸机制**：
+   - **回退未清理时**：前向可用净空自适应收敛，确保 `Past + Forward <= SAFE_LIMIT`，绝对不给 Chromium GC 触发机会；
+   - **回退被清理时**：一旦 B 站清理器调用 `sourceBuffer.remove(0, currentTime - margin)`，底层钩子即刻触发 `onRemove` 修剪账本，回退内存瞬间抹除，前向净空自动扩增，缓冲目标即刻向上爬升。
+4. **安全上限理性推升**：
+   由于彻底根除了回退内存盲区，系统无需再为未知回退预留过宽的安全死区，视频安全上限由 110 MiB 安全推升至 **125 MiB**（对 150 MiB 硬顶仍保留 25 MiB 冗余），音频提升至 **9.5 MiB**（对 12 MiB 硬顶保留 2.5 MiB 冗余），综合安全上限推升至 **135 MiB**。
 
 ---
 
@@ -181,9 +208,9 @@ $$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVid
 const CONFIG = {
     MIN_TIME_LIMIT: 20,                 // 最低缓冲时间下限 (秒)
     MAX_TIME_LIMIT: 600,                // 缓冲时间上限 600秒 (10分钟)
-    SAFE_BYTE_LIMIT: 120 * 1024 * 1024, // 综合安全内存空间上限 120MB (展示基准)
-    SAFE_VIDEO_BYTE_LIMIT: 110 * 1024 * 1024, // 视频安全内存上限 110 MiB (Chromium硬限制 150 MiB)
-    SAFE_AUDIO_BYTE_LIMIT: 8 * 1024 * 1024,   // 音频安全内存上限 8 MiB (Chromium硬限制 12 MiB)
+    SAFE_BYTE_LIMIT: 135 * 1024 * 1024, // 综合安全内存空间上限 135MB (展示基准)
+    SAFE_VIDEO_BYTE_LIMIT: 125 * 1024 * 1024, // 视频安全内存上限 125 MiB (Chromium硬限制 150 MiB，保留 25 MiB 冗余缓冲区)
+    SAFE_AUDIO_BYTE_LIMIT: Math.round(9.5 * 1024 * 1024), // 音频安全内存上限 9.5 MiB (Chromium硬限制 12 MiB，保留 2.5 MiB 冗余缓冲区)
     CHECK_INTERVAL: 3000,               // 内核优化轮询间隔 (毫秒)
     UI_REFRESH_RATE: 1000,              // UI 刷新间隔 (毫秒)
     HYSTERESIS_DELTA: 5,                // 缓冲目标调整容差 (秒，防频繁抖动)
@@ -202,7 +229,7 @@ const CONFIG = {
 | **官方默认缓冲** | `core.getStableBufferTime() = 20` | B 站默认将预载控制在 20 秒左右 |
 | **实测码率 (1080P)** | 视频 175 kbps / 音频 46 kbps | 综合约 27.1 KB/s |
 | **缓冲解除后爬升** | **21.0s $\rightarrow$ 210.4s**（耗时仅约 10 秒） | 成功下载后续数十个分片，进度条完全解锁 |
-| **内存实际占用** | 210 秒缓冲仅占约 **5.6 MB** | 与码率计算值完全吻合，远在 120MB 安全线内 |
+| **内存实际占用** | 210 秒缓冲仅占约 **5.6 MB** | 与码率计算值完全吻合，远在 135MB 安全线内 |
 
 ---
 
@@ -210,23 +237,25 @@ const CONFIG = {
 
 ### 🚀 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
 
-#### v3.3-beta (2026-09) - *里程碑升级：MSE 分片实时物理追踪与闭环防爆架构*
-- 📦 **实时 MSE 分片追踪引擎 (`ChunkTracker`)**：
+#### v3.3-beta (2026-09) - *里程碑升级：MSE 分片实时物理追踪、全量活跃总账本与闭环防爆架构*
+- 📦 **全量活跃物理分片追踪引擎 (`ChunkTracker`)**：
   - 底层拦截 `MediaSource.prototype.addSourceBuffer`，精准标记音视频分片轨属（`video` / `audio`）；
   - 拦截 `SourceBuffer.prototype.appendBuffer`，监听 `updateend` 并使用时序差分算法提取分片物理大小（`data.byteLength`）与时序区间 $[start, end]$，记录物理分片账本；
   - 拦截 `SourceBuffer.prototype.remove`，实现用户快进或内核历史裁剪时的精确物理区间修剪；
+  - **实现全量活跃账本透视**：同时提供前向连续缓冲（`forward`）、回退未清理内存（`past`）与 MSE 全局物理账本（`totalActive`），提供完整属性与 getter 接口；
   - 建立滑动窗口移动平均码率计算（Rolling Bitrate），秒级感知场景动态复杂度。
-- 🧠 **闭环自适应流控与音视频双轨物理防爆 (Closed-Loop Budgeting)**：
+- 🧠 **回退动态净空流控与安全限额提升 (Dynamic Back-Buffer Headroom Regulation)**：
+  - **动态净空呼吸流控**：$\text{remainingHeadroom} = \max(0, \text{SAFE\_LIMIT} - \text{totalBytes})$。当回退历史缓冲较多时前向可用净空自适应收敛；当 B 站后台清理器通过 `remove()` 释放回退分片时，前向配额秒级自动扩容释放；
+  - **安全限额稳步调优**：根除回退盲区后，视频安全上限安全提升至 **125 MiB**（对 Chromium 150 MiB 硬顶保留 25 MiB 冗余），音频上限提升至 **9.5 MiB**（对 12 MiB 硬顶保留 2.5 MiB 冗余），综合基准提升至 **135 MiB**；
   - 引入 $\text{effectiveVideoBps} = \max(\text{manifestBps}, \text{rollingBps})$ 动态码率自适应，针对高动态 3D 游戏（如 `BV1oZeA6fERD`）瞬间压缩目标时长，杜绝物理过载；
-  - 引入音视频双轨 90% 前向物理内存安全熔断（视频 99 MiB / 音频 7.2 MiB），任一单轨逼近上限时自适应封顶前向缓冲，从根本上杜绝 Chromium 150 MiB 视频与 12 MiB 音频内存 GC 驱逐与重缓冲崩溃；
+  - 引入音视频双轨 90% 前向与全局物理内存安全熔断（视频 112.5 MiB / 音频 8.55 MiB），任一单轨逼近上限时自适应封顶前向缓冲，从根本上杜绝 Chromium 150 MiB 视频与 12 MiB 音频内存 GC 驱逐与重缓冲崩溃；
   - 亚秒级抖动抑制：滑动窗口设置 1.0s 最小采样时长门槛，消除单帧 I 帧瞬时虚高噪点；
   - 冷启动与换源兼容：修复首屏启动分片持久化，仅切集换源重置账本；未收集分片时全自动平滑降级至清单双配额模型。
 - ⏱️ **执行生命周期提前至 `@run-at document-start`**：
   - 在播放器 Dash.js 内核加载前即注入底层 MSE 原型钩子，确保从第 1 个分片起 100% 完整捕获；
   - DOM 依赖组件（UI、事件监听）自适应延迟至 `DOMContentLoaded` 唤醒。
-- 🎨 **双 UI 物理实测数据展示**：
-  - 原生统计面板集成物理实测数据，实测内存高亮附带专属绿色 `实测` 标识；
-  - 控制栏悬浮微标 Tooltip 增加分轨实测与物理总容量对比展示。
+- 🎨 **双 UI 全景物理实测数据展示**：
+  - 原生统计面板与控制栏微标悬浮 Tooltip 同步集成双视角物理实测数据，显示前向连续大小、回退未释放大小与 MSE 全局总活跃载荷。
 
 #### v3.2 (2026-09)
 - 🛡️ **双配额独立内存安全预算 (Dual-Quota Memory Budget)**：

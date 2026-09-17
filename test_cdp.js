@@ -143,6 +143,8 @@ async function runCDPTest() {
                                 actualVideoMB: (actual.videoBytes / 1048576).toFixed(2),
                                 actualAudioMB: (actual.audioBytes / 1048576).toFixed(2),
                                 actualTotalMB: (actual.totalBytes / 1048576).toFixed(2),
+                                actualPastMB: (actual.pastTotalBytes / 1048576).toFixed(2),
+                                actualTotalActiveMB: (actual.totalActiveBytes / 1048576).toFixed(2),
                                 videoChunksCount: vChunks,
                                 audioChunksCount: aChunks,
                                 rollingVideoKbps: Math.round((rollingV * 8) / 1000),
@@ -159,7 +161,7 @@ async function runCDPTest() {
                     if (val.videoChunksCount > 0 || val.audioChunksCount > 0) {
                         capturedChunks = true;
                     }
-                    console.log(`[T+${second}s] Play: ${val.currentTime.toFixed(1)}s | Buf: ${val.buffered.toFixed(1)}s/${val.target}s | Chunks: V=${val.videoChunksCount}, A=${val.audioChunksCount} | RealMem: ${val.actualTotalMB}MB (V=${val.actualVideoMB}MB, A=${val.actualAudioMB}MB) | VBR: ${val.rollingVideoKbps}kbps`);
+                    console.log(`[T+${second}s] Play: ${val.currentTime.toFixed(1)}s | Buf: ${val.buffered.toFixed(1)}s/${val.target}s | Chunks: V=${val.videoChunksCount}, A=${val.audioChunksCount} | FwdMem: ${val.actualTotalMB}MB | PastMem: ${val.actualPastMB}MB | ActiveMSE: ${val.actualTotalActiveMB}MB | VBR: ${val.rollingVideoKbps}kbps`);
                 } else {
                     console.log(`[T+${second}s] Player initializing...`);
                 }
