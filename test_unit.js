@@ -743,6 +743,10 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     const panel = UIManager.statsPanelRef;
     assert(panel !== null, 'Stats panel should be created');
     const memCur = UIManager.cachedStatsElements?.memCur;
+    const memTar = UIManager.cachedStatsElements?.memTar;
+    assert.strictEqual(memCur.textContent, '30 MB', 'memCur should show forward memory');
+    assert.strictEqual(memTar.textContent, '135 MB', 'memTar should show limit (Scheme 1B)');
+    assert.strictEqual(UIManager.cachedStatsElements?.memActualTag, undefined, 'memActualTag should be removed');
     assert(memCur && memCur.title.includes('前向 30 MB'), 'Tooltip should contain forward memory');
     assert(memCur.title.includes('回退未清理: 10 MB'), 'Tooltip should contain past memory');
     assert(memCur.title.includes('MSE总活跃: 40 MB'), 'Tooltip should contain total active memory');
@@ -858,17 +862,14 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(badge.id, 'bili-buffer-badge');
     assert.strictEqual(UIManager.badgeTextRef.textContent, `⚡${Utils.formatTime(stats.time.current)}`);
 
-    // Verify title text contains forward, past, and total active memory
-    assert(badge.title.includes('前向 30 MB'), 'Badge title should contain forward size');
-    assert(badge.title.includes('回退 10 MB'), 'Badge title should contain past size');
-    assert(badge.title.includes('总活跃 40 MB'), 'Badge title should contain total active size');
-    assert(badge.title.includes('上限 135 MB'), 'Badge title should contain memory limit');
+    // Verify title text follows Scheme 2A (⚡time | ⏪ past + ⏩ forward = total / limit)
+    assert(badge.title.includes('⏪ 10 MB + ⏩ 30 MB = 40 MB / 135 MB'), `Badge title should follow Scheme 2A format, got: ${badge.title}`);
 
-    // Test badge when past memory is 0
+    // Test badge when past memory is 0 (should preserve ⏪ 0 MB format)
     ChunkTracker.onRemove('video', 0, 10);
     const statsNoPast = CoreManager.getStats();
     UIManager.updateControlBarBadge(statsNoPast);
-    assert(badge.title.includes('物理实测: 30 MB (总活跃 30 MB)'), 'Badge title without past should format cleanly');
+    assert(badge.title.includes('⏪ 0 MB + ⏩ 30 MB = 30 MB / 135 MB'), `Badge title without past should preserve ⏪ 0 MB format, got: ${badge.title}`);
 
     console.log('✓ UIManager.updateControlBarBadge Lifecycle & Tooltip passed.');
 }

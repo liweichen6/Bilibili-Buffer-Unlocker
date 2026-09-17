@@ -1132,7 +1132,6 @@
                             <span id="buf-time-tar" style="color:#888;">0s</span>
                             <span style="display:inline-block; width:1px; height:10px; background:#444; margin:0 8px;"></span>
                             <span id="buf-mem-cur" style="color:#bae637;">0 MB</span>
-                            <span id="buf-mem-actual-tag" style="display:none; color:#52c41a; font-size:10px; margin-left:4px; border:1px solid rgba(82,196,26,0.5); border-radius:3px; padding:0 2px;">实测</span>
                             <span style="color:#666; margin:0 2px;">/</span>
                             <span id="buf-mem-tar" style="color:#888; font-size:11px;">0 MB</span>
                             <span id="buf-hires-tag" style="display:none; color:#ff85c0; font-size:10px; margin-left:6px; border:1px solid #ff85c0; border-radius:3px; padding:0 3px;">Hi-Res 免干预</span>
@@ -1146,7 +1145,6 @@
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
                     memCur: panel.querySelector('#buf-mem-cur'),
-                    memActualTag: panel.querySelector('#buf-mem-actual-tag'),
                     memTar: panel.querySelector('#buf-mem-tar'),
                     hiresTag: panel.querySelector('#buf-hires-tag')
                 };
@@ -1156,7 +1154,6 @@
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
                     memCur: panel.querySelector('#buf-mem-cur'),
-                    memActualTag: panel.querySelector('#buf-mem-actual-tag'),
                     memTar: panel.querySelector('#buf-mem-tar'),
                     hiresTag: panel.querySelector('#buf-hires-tag')
                 };
@@ -1172,7 +1169,6 @@
 
             if (stats.memory.hasActual) {
                 el.memCur.textContent = Utils.formatSize(stats.memory.actualCurrent);
-                if (el.memActualTag) el.memActualTag.style.display = 'inline';
                 let tooltip = `物理实测: 前向 ${Utils.formatSize(stats.memory.actualCurrent)} (V:${Utils.formatSize(stats.memory.actualVideo)} A:${Utils.formatSize(stats.memory.actualAudio)})`;
                 if (stats.memory.actualPastTotal > 0) {
                     tooltip += ` | 回退未清理: ${Utils.formatSize(stats.memory.actualPastTotal)}`;
@@ -1181,11 +1177,11 @@
                 el.memCur.title = tooltip;
             } else {
                 el.memCur.textContent = Utils.formatSize(stats.memory.current);
-                if (el.memActualTag) el.memActualTag.style.display = 'none';
                 el.memCur.title = `估算内存: ${Utils.formatSize(stats.memory.current)}`;
             }
 
-            el.memTar.textContent = Utils.formatSize(stats.memory.target);
+            el.memTar.textContent = Utils.formatSize(stats.memory.limit);
+            el.memTar.title = `安全内存上限: ${Utils.formatSize(stats.memory.limit)}`;
             el.hiresTag.style.display = stats.hiRes ? 'inline' : 'none';
         },
 
@@ -1308,17 +1304,13 @@
                 UIManager.badgeTextRef.textContent = `⚡${Utils.formatTime(stats.time.current)}`;
             }
 
-            let memText;
+            let memTooltip;
             if (stats.memory.hasActual) {
-                if (stats.memory.actualPastTotal > 0) {
-                    memText = `物理实测: 前向 ${Utils.formatSize(stats.memory.actualCurrent)} + 回退 ${Utils.formatSize(stats.memory.actualPastTotal)} (总活跃 ${Utils.formatSize(stats.memory.actualTotalActive)})`;
-                } else {
-                    memText = `物理实测: ${Utils.formatSize(stats.memory.actualCurrent)} (总活跃 ${Utils.formatSize(stats.memory.actualTotalActive)})`;
-                }
+                memTooltip = `⏪ ${Utils.formatSize(stats.memory.actualPastTotal)} + ⏩ ${Utils.formatSize(stats.memory.actualCurrent)} = ${Utils.formatSize(stats.memory.actualTotalActive)} / ${Utils.formatSize(stats.memory.limit)}`;
             } else {
-                memText = `内存估算: ${Utils.formatSize(stats.memory.current)}`;
+                memTooltip = `⏩ ${Utils.formatSize(stats.memory.current)} / ${Utils.formatSize(stats.memory.limit)}`;
             }
-            badge.title = `已缓冲: ${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memText} / 上限 ${Utils.formatSize(stats.memory.limit)} (点击手动触发解限)`;
+            badge.title = `⚡${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memTooltip}`;
         },
 
         update: () => {
