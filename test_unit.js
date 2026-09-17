@@ -102,19 +102,13 @@ const mockDocument = {
     documentElement: { appendChild: () => {} },
     querySelector: (selector) => {
         if (selector === 'video') return mockVideo;
-        if (selector.includes('info-container')) return {
-            offsetParent: {},
-            contains: () => true,
-            appendChild: () => {},
-            querySelectorAll: () => []
-        };
-        if (selector.includes('control-bottom-left')) return {
-            contains: () => true,
-            appendChild: () => {}
-        };
+        if (selector.includes('info-container')) return mockInfoContainer;
+        if (selector.includes('control-bottom-left')) return mockCtrlBottomLeft;
         return null;
     },
     querySelectorAll: (selector) => {
+        if (selector.includes('my-buffer-overlay')) return mockInfoPanels;
+        if (selector.includes('bili-buffer-badge')) return mockCtrlBadges;
         return [];
     },
     _elementsById: {},
@@ -123,25 +117,89 @@ const mockDocument = {
         const el = {
             tagName: tag.toUpperCase(),
             style: {},
-            innerHTML: '',
-            textContent: '',
             _id: '',
+            _textContent: '',
+            _subElements: {},
             set id(val) {
                 this._id = val;
                 mockDocument._elementsById[val] = this;
+                if (!this._textContent) {
+                    if (val === 'buf-hires-tag') this._textContent = 'Hi-Res 免干预';
+                    else if (val === 'buf-video-val') this._textContent = '0 MB + 0 MB = 0 MB';
+                    else if (val === 'buf-time-cur') this._textContent = '0s';
+                    else if (val === 'buf-time-tar') this._textContent = '0s';
+                    else if (val === 'buf-video-limit') this._textContent = '0 MB';
+                    else if (val === 'buf-audio-val') this._textContent = '0 MB';
+                    else if (val === 'buf-audio-limit') this._textContent = '0 MB';
+                }
             },
             get id() { return this._id; },
-            querySelector: () => ({ style: {}, textContent: '' }),
-            querySelectorAll: () => [],
+            get textContent() {
+                if (this._id === 'buf-line-cache') {
+                    const cur = mockDocument._elementsById['buf-time-cur']?.textContent || '0s';
+                    const tar = mockDocument._elementsById['buf-time-tar']?.textContent || '0s';
+                    const hires = mockDocument._elementsById['buf-hires-tag'];
+                    const hiresText = (hires && hires.style && hires.style.display === 'inline') ? ' [Hi-Res 免干预]' : '';
+                    return `缓存: ${cur} / ${tar}${hiresText}`;
+                }
+                if (this._id === 'buf-line-video') {
+                    return '视频: ' + (mockDocument._elementsById['buf-video-val']?.textContent || '0 MB') + ' / ' + (mockDocument._elementsById['buf-video-limit']?.textContent || '0 MB');
+                }
+                if (this._id === 'buf-line-audio') {
+                    return '音频: ' + (mockDocument._elementsById['buf-audio-val']?.textContent || '0 MB') + ' / ' + (mockDocument._elementsById['buf-audio-limit']?.textContent || '0 MB');
+                }
+                if (this._id === 'my-buffer-overlay') {
+                    const c = mockDocument._elementsById['buf-line-cache']?.textContent || '';
+                    const v = mockDocument._elementsById['buf-line-video']?.textContent || '';
+                    const a = mockDocument._elementsById['buf-line-audio']?.textContent || '';
+                    return [c, v, a].filter(Boolean).join('\n');
+                }
+                return this._textContent;
+            },
+            set textContent(v) { this._textContent = v; },
+            querySelector: function(sel) {
+                if (!this._subElements[sel]) {
+                    const sub = mockDocument.createElement('span');
+                    if (sel.startsWith('#')) sub.id = sel.slice(1);
+                    this._subElements[sel] = sub;
+                }
+                return this._subElements[sel];
+            },
+            querySelectorAll: function(sel) {
+                if (sel === '.info-line') {
+                    const l1 = mockDocument._elementsById['buf-line-cache'];
+                    const l2 = mockDocument._elementsById['buf-line-video'];
+                    const l3 = mockDocument._elementsById['buf-line-audio'];
+                    return [l1, l2, l3].filter(Boolean);
+                }
+                return [];
+            },
             addEventListener: () => {},
             contains: () => true,
             remove: function() {
+                mockInfoPanels = mockInfoPanels.filter(p => p !== this);
+                mockCtrlBadges = mockCtrlBadges.filter(b => b !== this);
                 if (this._id) delete mockDocument._elementsById[this._id];
             }
         };
         return el;
     },
     addEventListener: () => {}
+};
+
+let mockInfoPanels = [];
+const mockInfoContainer = {
+    offsetParent: {},
+    contains: (el) => mockInfoPanels.includes(el),
+    appendChild: (el) => { if (!mockInfoPanels.includes(el)) mockInfoPanels.push(el); },
+    querySelectorAll: (sel) => sel.includes('my-buffer-overlay') ? mockInfoPanels : []
+};
+
+let mockCtrlBadges = [];
+const mockCtrlBottomLeft = {
+    contains: (el) => mockCtrlBadges.includes(el),
+    appendChild: (el) => { if (!mockCtrlBadges.includes(el)) mockCtrlBadges.push(el); },
+    querySelectorAll: (sel) => sel.includes('bili-buffer-badge') ? mockCtrlBadges : []
 };
 
 const mockWindow = {
@@ -719,39 +777,143 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     console.log('✓ Straddling Chunk Boundary Math Precision passed.');
 }
 
-// Test 19: UIManager and getStats Dual-Perspective Integration
+// Test 19: UIManager and getStats Multi-Line Stats Panel Integration & Color Logic
 {
-    console.log('\n[Test 19] Testing UIManager and getStats Dual-Perspective Integration...');
+    console.log('\n[Test 19] Testing UIManager and getStats Multi-Line Stats Panel Integration & Color Logic...');
     ChunkTracker.reset();
     mockVideo.currentTime = 10;
     mockVideo.buffered._setRanges([[0, 40]]);
+    // 10 MB past video, 30 MB forward video -> 40 MB total video
     ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
     ChunkTracker.recordChunk('video', 10, 40, 30 * 1024 * 1024);
+    // Audio 9.48 MB (tests sub-MB precision formatting)
+    ChunkTracker.recordChunk('audio', 0, 40, 9.48 * 1024 * 1024);
 
     const stats = CoreManager.getStats();
     assert.strictEqual(stats.memory.actualPastVideo, 10 * 1024 * 1024);
     assert.strictEqual(stats.memory.actualVideo, 30 * 1024 * 1024);
     assert.strictEqual(stats.memory.actualTotalVideo, 40 * 1024 * 1024);
-    assert.strictEqual(stats.memory.actualTotalActive, 40 * 1024 * 1024);
-    assert.strictEqual(stats.memory.actualPast, 10 * 1024 * 1024);
-    assert.strictEqual(stats.memory.actualPastTotal, 10 * 1024 * 1024);
-    assert.strictEqual(stats.memory.actualTotal, 40 * 1024 * 1024);
+    assert.strictEqual(stats.memory.actualTotalAudio, 9.48 * 1024 * 1024);
     assert.strictEqual(stats.memory.limit, 135 * 1024 * 1024);
 
-    // Verify UI update renders without error
+    // Verify UI update renders multi-line stats panel
     UIManager.update();
     const panel = UIManager.statsPanelRef;
     assert(panel !== null, 'Stats panel should be created');
-    const memCur = UIManager.cachedStatsElements?.memCur;
-    const memTar = UIManager.cachedStatsElements?.memTar;
-    assert.strictEqual(memCur.textContent, '30 MB', 'memCur should show forward memory');
-    assert.strictEqual(memTar.textContent, '135 MB', 'memTar should show limit (Scheme 1B)');
-    assert.strictEqual(UIManager.cachedStatsElements?.memActualTag, undefined, 'memActualTag should be removed');
-    assert(memCur && memCur.title.includes('前向 30 MB'), 'Tooltip should contain forward memory');
-    assert(memCur.title.includes('回退未清理: 10 MB'), 'Tooltip should contain past memory');
-    assert(memCur.title.includes('MSE总活跃: 40 MB'), 'Tooltip should contain total active memory');
 
-    console.log('✓ UIManager and getStats Dual-Perspective Integration passed.');
+    const el = UIManager.cachedStatsElements;
+    assert(el !== null, 'cachedStatsElements should exist');
+
+    // Check Line 1: 缓存 (缓存: 30s / ...)
+    const lineCache = panel.querySelector('#buf-line-cache');
+    assert.strictEqual(el.timeCur.textContent, '30s');
+    assert.strictEqual(lineCache.textContent, `缓存: 30s / ${el.timeTar.textContent}`);
+
+    // Check Line 2: 视频 (视频: 10 MB + 30 MB = 40 MB / 135 MB)
+    const lineVideo = panel.querySelector('#buf-line-video');
+    assert.strictEqual(el.videoVal.textContent, '10 MB + 30 MB = 40 MB');
+    assert.strictEqual(el.videoLimit.textContent, '135 MB');
+    assert.strictEqual(lineVideo.textContent, '视频: 10 MB + 30 MB = 40 MB / 135 MB');
+
+    // Check Line 3: 音频 (音频: 9.48 MB / 9.5 MB)
+    const lineAudio = panel.querySelector('#buf-line-audio');
+    assert.strictEqual(el.audioVal.textContent, '9.48 MB');
+    assert.strictEqual(el.audioLimit.textContent, '9.5 MB');
+    assert.strictEqual(lineAudio.textContent, '音频: 9.48 MB / 9.5 MB');
+
+    // Check full panel text structure
+    const fullText = panel.textContent;
+    assert(fullText.includes(`缓存: 30s / ${el.timeTar.textContent}`), 'Panel should include Line 1 缓存');
+    assert(fullText.includes('视频: 10 MB + 30 MB = 40 MB / 135 MB'), 'Panel should include Line 2 视频');
+    assert(fullText.includes('音频: 9.48 MB / 9.5 MB'), 'Panel should include Line 3 音频');
+
+    // Check Hi-Res tag display (hidden by default, visible when hiRes: true)
+    assert.strictEqual(el.hiresTag.style.display, 'none', 'Hi-Res tag should be hidden by default');
+    const statsHiRes = Object.assign({}, stats, { hiRes: true });
+    UIManager.updateStatsPanel(statsHiRes);
+    assert.strictEqual(el.hiresTag.style.display, 'inline', 'Hi-Res tag should be visible when hiRes is true');
+    assert.strictEqual(el.hiresTag.textContent, 'Hi-Res 免干预', 'Hi-Res tag text should match');
+    assert(panel.querySelector('#buf-line-cache').textContent.includes('Hi-Res 免干预'), 'Line 1 text should include Hi-Res tag');
+    // Restore non-Hi-Res state
+    UIManager.updateStatsPanel(stats);
+    assert.strictEqual(el.hiresTag.style.display, 'none', 'Hi-Res tag should be hidden again');
+
+    // Check Color Logic:
+    // Video: 40 MB / 125 MB = 32% (< 80%) -> #00aeec
+    // Audio: 9.48 MB / 9.5 MB = 99.8% (>= 90%) -> #ff7a45
+    // Max ratio: 99.8% (>= 90%) -> #ff7a45 (Buffer throttled by audio saturation)
+    assert.strictEqual(el.videoVal.style.color, '#00aeec', 'Video should be cyan (< 80%)');
+    assert.strictEqual(el.audioVal.style.color, '#ff7a45', 'Audio should be coral (>= 90%)');
+    assert.strictEqual(el.timeCur.style.color, '#ff7a45', 'Buffer time should be coral because overall buffer is capped by audio');
+
+    // Subtest: Test amber warning color (0.80 <= ratio < 0.90)
+    // Evict audio, and add video to 105 MB (105 / 125 = 84%)
+    ChunkTracker.reset();
+    ChunkTracker.recordChunk('video', 0, 30, 105 * 1024 * 1024);
+    ChunkTracker.recordChunk('audio', 0, 30, 1 * 1024 * 1024); // 1 MB / 9.5 MB = 10.5%
+    UIManager.update();
+    assert.strictEqual(el.videoVal.style.color, '#faad14', 'Video at 84% should be amber (#faad14)');
+    assert.strictEqual(el.audioVal.style.color, '#00aeec', 'Audio at 10.5% should be cyan (#00aeec)');
+    assert.strictEqual(el.timeCur.style.color, '#faad14', 'Buffer time at 84% max ratio should be amber (#faad14)');
+
+    // Subtest: Test all cyan (< 0.80) & past = 0 format
+    ChunkTracker.reset();
+    ChunkTracker.recordChunk('video', 10, 40, 58 * 1024 * 1024); // 58 MB forward, 0 past
+    ChunkTracker.recordChunk('audio', 10, 40, 2 * 1024 * 1024);  // 2 MB audio
+    UIManager.update();
+    assert.strictEqual(el.videoVal.textContent, '0 MB + 58 MB = 58 MB', 'Past=0 should display 0 MB + 58 MB = 58 MB');
+    assert.strictEqual(el.videoVal.style.color, '#00aeec', 'Video at 46% should be cyan (#00aeec)');
+    assert.strictEqual(el.audioVal.style.color, '#00aeec', 'Audio at 21% should be cyan (#00aeec)');
+    assert.strictEqual(el.timeCur.style.color, '#00aeec', 'Buffer time at 46% should be cyan (#00aeec)');
+
+    // Subtest: Test exact prompt example
+    // 缓存: 7m39s / 7m39s
+    // 视频: 0.5 MB + 58 MB = 59 MB / 135 MB
+    // 音频: 9.48 MB / 9.5 MB
+    ChunkTracker.reset();
+    mockVideo.currentTime = 459; // 7m39s
+    mockVideo.duration = 918;
+    mockVideo.buffered._setRanges([[0, 918]]); // 459s forward buffer = 7m39s
+    ChunkTracker.recordChunk('video', 458.5, 459, 0.5 * 1024 * 1024); // 0.5 MB past
+    ChunkTracker.recordChunk('video', 459, 918, 58 * 1024 * 1024);     // 58 MB forward
+    ChunkTracker.recordChunk('audio', 0, 918, 9.48 * 1024 * 1024);     // 9.48 MB audio
+    UIManager.update();
+    assert.strictEqual(el.timeCur.textContent, '7m39s');
+    assert.strictEqual(el.videoVal.textContent, '0.5 MB + 58 MB = 59 MB');
+    assert.strictEqual(el.videoLimit.textContent, '135 MB');
+    assert.strictEqual(el.audioVal.textContent, '9.48 MB');
+    assert.strictEqual(el.audioLimit.textContent, '9.5 MB');
+    assert.strictEqual(lineVideo.textContent, '视频: 0.5 MB + 58 MB = 59 MB / 135 MB');
+    assert.strictEqual(lineAudio.textContent, '音频: 9.48 MB / 9.5 MB');
+
+    // Subtest: Boundary test Utils.getColorByRatio and Utils.formatSize
+    assert.strictEqual(Utils.getColorByRatio(0), '#00aeec');
+    assert.strictEqual(Utils.getColorByRatio(0.799), '#00aeec');
+    assert.strictEqual(Utils.getColorByRatio(0.80), '#faad14');
+    assert.strictEqual(Utils.getColorByRatio(0.899), '#faad14');
+    assert.strictEqual(Utils.getColorByRatio(0.90), '#ff7a45');
+    assert.strictEqual(Utils.getColorByRatio(1.2), '#ff7a45');
+    assert.strictEqual(Utils.getColorByRatio(Infinity), '#ff7a45');
+    assert.strictEqual(Utils.getColorByRatio(NaN), '#00aeec');
+    assert.strictEqual(Utils.getColorByRatio(undefined), '#00aeec');
+    assert.strictEqual(Utils.getColorByRatio(null), '#00aeec');
+    assert.strictEqual(Utils.getColorByRatio(-1), '#00aeec');
+
+    assert.strictEqual(Utils.formatSize(0), '0 MB');
+    assert.strictEqual(Utils.formatSize(0.5 * 1024 * 1024), '0.5 MB');
+    assert.strictEqual(Utils.formatSize(9.48 * 1024 * 1024), '9.48 MB');
+    assert.strictEqual(Utils.formatSize(9.5 * 1024 * 1024), '9.5 MB');
+    assert.strictEqual(Utils.formatSize(10 * 1024 * 1024), '10 MB');
+    assert.strictEqual(Utils.formatSize(58 * 1024 * 1024), '58 MB');
+    assert.strictEqual(Utils.formatSize(59 * 1024 * 1024), '59 MB');
+    assert.strictEqual(Utils.formatSize(135 * 1024 * 1024), '135 MB');
+    assert.strictEqual(Utils.formatSize(0.005 * 1024 * 1024), '<0.01 MB');
+    assert.strictEqual(Utils.formatSize(-100), '0 MB');
+    assert.strictEqual(Utils.formatSize(NaN), '0 MB');
+    assert.strictEqual(Utils.formatSize(undefined), '0 MB');
+    assert.strictEqual(Utils.formatSize(null), '0 MB');
+
+    console.log('✓ UIManager and getStats Multi-Line Stats Panel Integration & Color Logic passed.');
 }
 
 // Test 20: Audio Back-Buffer Dynamic Headroom Regulation & Eviction Expansion
@@ -844,9 +1006,9 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     console.log('✓ Total Physical Byte Limit (SAFE_BYTE_LIMIT) Closed-Loop Regulation passed.');
 }
 
-// Test 22: UIManager.updateControlBarBadge Lifecycle & Tooltip Rendering
+// Test 22: UIManager.updateControlBarBadge Lifecycle, Simplified Tooltip & Text Color Logic
 {
-    console.log('\n[Test 22] Testing UIManager.updateControlBarBadge Lifecycle & Tooltip...');
+    console.log('\n[Test 22] Testing UIManager.updateControlBarBadge Lifecycle, Simplified Tooltip & Text Color Logic...');
     ChunkTracker.reset();
 
     mockVideo.currentTime = 10;
@@ -862,16 +1024,57 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(badge.id, 'bili-buffer-badge');
     assert.strictEqual(UIManager.badgeTextRef.textContent, `⚡${Utils.formatTime(stats.time.current)}`);
 
-    // Verify title text follows Scheme 2A (⚡time | ⏪ past + ⏩ forward = total / limit)
-    assert(badge.title.includes('⏪ 10 MB + ⏩ 30 MB = 40 MB / 135 MB'), `Badge title should follow Scheme 2A format, got: ${badge.title}`);
+    // Verify tooltip follows clean format: ${timeCur} / ${timeTar} | ${memTotalActive} / ${memLimit}
+    const expectedTooltip = `${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | 40 MB / 135 MB`;
+    assert.strictEqual(badge.title, expectedTooltip, `Badge title should be '${expectedTooltip}', got: ${badge.title}`);
 
-    // Test badge when past memory is 0 (should preserve ⏪ 0 MB format)
+    // Verify badge text color (< 0.80 -> #00aeec)
+    assert.strictEqual(UIManager.badgeTextRef.style.color, '#00aeec', 'Badge text color should be cyan (< 80%)');
+    // Verify border is not altered (only text color changes)
+    assert.strictEqual(UIManager.badgeTextRef.style.border, undefined, 'Badge text border should not be touched');
+    assert.strictEqual(UIManager.badgeTextRef.style.borderColor, undefined, 'Badge text borderColor should not be touched');
+
+    // Test badge when past memory is 0
     ChunkTracker.onRemove('video', 0, 10);
     const statsNoPast = CoreManager.getStats();
     UIManager.updateControlBarBadge(statsNoPast);
-    assert(badge.title.includes('⏪ 0 MB + ⏩ 30 MB = 30 MB / 135 MB'), `Badge title without past should preserve ⏪ 0 MB format, got: ${badge.title}`);
+    const expectedTooltipNoPast = `${Utils.formatTime(statsNoPast.time.current)} / ${Utils.formatTime(statsNoPast.time.target)} | 30 MB / 135 MB`;
+    assert.strictEqual(badge.title, expectedTooltipNoPast, `Badge title without past should be '${expectedTooltipNoPast}', got: ${badge.title}`);
 
-    console.log('✓ UIManager.updateControlBarBadge Lifecycle & Tooltip passed.');
+    // Test warning color (0.80 <= ratio < 0.90 -> #faad14)
+    ChunkTracker.reset();
+    ChunkTracker.recordChunk('video', 0, 30, 105 * 1024 * 1024); // 105 / 125 = 84%
+    const statsAmber = CoreManager.getStats();
+    UIManager.updateControlBarBadge(statsAmber);
+    assert.strictEqual(UIManager.badgeTextRef.style.color, '#faad14', 'Badge text color should be amber at 84%');
+
+    // Test capped color (ratio >= 0.90 -> #ff7a45)
+    ChunkTracker.recordChunk('video', 30, 35, 12 * 1024 * 1024); // 117 / 125 = 93.6%
+    const statsCoral = CoreManager.getStats();
+    UIManager.updateControlBarBadge(statsCoral);
+    assert.strictEqual(UIManager.badgeTextRef.style.color, '#ff7a45', 'Badge text color should be coral at >= 90%');
+
+    // Test audio saturation triggering coral on badge text (> 90%)
+    ChunkTracker.reset();
+    ChunkTracker.recordChunk('video', 0, 30, 20 * 1024 * 1024); // Video 20 MB / 125 MB = 16% (cyan)
+    ChunkTracker.recordChunk('audio', 0, 30, 9.48 * 1024 * 1024); // Audio 9.48 MB / 9.5 MB = 99.8% (coral)
+    const statsAudioCap = CoreManager.getStats();
+    UIManager.updateControlBarBadge(statsAudioCap);
+    assert.strictEqual(UIManager.badgeTextRef.style.color, '#ff7a45', 'Badge text should be coral when audio triggers saturation cap');
+    assert.strictEqual(badge.title, `${Utils.formatTime(statsAudioCap.time.current)} / ${Utils.formatTime(statsAudioCap.time.target)} | 29 MB / 135 MB`);
+    assert.strictEqual(UIManager.badgeTextRef.title, badge.title, 'Badge text title should mirror badge.title');
+
+    // Test fallback before actual chunks (hasActual = false)
+    const statsFallback = {
+        time: { current: 15, target: 60, percent: 25 },
+        memory: { current: 20 * 1024 * 1024, limit: 135 * 1024 * 1024, hasActual: false }
+    };
+    UIManager.updateControlBarBadge(statsFallback);
+    const expectedFallbackTooltip = `15s / 1m00s | 20 MB / 135 MB`;
+    assert.strictEqual(badge.title, expectedFallbackTooltip, `Fallback badge title should be '${expectedFallbackTooltip}', got: ${badge.title}`);
+    assert.strictEqual(UIManager.badgeTextRef.style.color, '#00aeec', 'Fallback badge text color should be cyan (< 80%)');
+
+    console.log('✓ UIManager.updateControlBarBadge Lifecycle, Simplified Tooltip & Text Color Logic passed.');
 }
 
 // Test 8: End-to-end MSE Hook interception

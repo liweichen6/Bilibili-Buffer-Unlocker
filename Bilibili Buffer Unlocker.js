@@ -53,9 +53,15 @@
         formatSize: (bytes) => {
             if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
             const mb = bytes / (1024 * 1024);
-            if (mb < 0.1) return '<0.1 MB';
-            if (mb < 10) return `${mb.toFixed(1)} MB`;
+            if (mb < 0.01) return '<0.01 MB';
+            if (mb < 10) return `${parseFloat(mb.toFixed(2))} MB`;
             return `${Math.round(mb)} MB`;
+        },
+
+        getColorByRatio: (ratio) => {
+            if (typeof ratio !== 'number' || Number.isNaN(ratio) || ratio < 0.80) return '#00aeec';
+            if (ratio < 0.90) return '#faad14';
+            return '#ff7a45';
         },
 
         // 从 video.buffered 中提取并合并与当前播放进度匹配的前向连续时间区间
@@ -1117,24 +1123,36 @@
             }
 
             let panel = existingPanels[0] || null;
-            if (!panel || !panel.querySelector('#buf-time-cur')) {
+            if (!panel || !panel.querySelector('#buf-time-cur') || !panel.querySelector('#buf-video-val') || !panel.querySelector('#buf-audio-val')) {
                 if (panel) panel.remove();
                 panel = document.createElement('div');
                 panel.id = 'my-buffer-overlay';
                 panel.style.cssText = 'margin:0;padding:6px 12px;border-top:1px solid rgba(255,255,255,0.15);font-size:12px;color:#fff;display:block;font-family:inherit;line-height:20px;';
 
                 panel.innerHTML = `
-                    <div class="info-line" style="display:flex; align-items:center; flex-wrap:wrap;">
-                        <span class="info-title" style="color:#999; margin-right:8px;">缓冲状态</span>
+                    <div class="info-line" id="buf-line-cache" style="display:flex; align-items:center; flex-wrap:wrap;">
+                        <span class="info-title" style="color:#999; margin-right:8px;">缓存:</span>
                         <span class="info-data" style="font-weight:bold; display:inline-flex; align-items:center;">
-                            <span id="buf-time-cur">0s</span>
-                            <span style="color:#666; margin:0 2px;">/</span>
+                            <span id="buf-time-cur" style="transition:color 0.2s;">0s</span>
+                            <span style="color:#666; margin:0 3px;">/</span>
                             <span id="buf-time-tar" style="color:#888;">0s</span>
-                            <span style="display:inline-block; width:1px; height:10px; background:#444; margin:0 8px;"></span>
-                            <span id="buf-mem-cur" style="color:#bae637;">0 MB</span>
-                            <span style="color:#666; margin:0 2px;">/</span>
-                            <span id="buf-mem-tar" style="color:#888; font-size:11px;">0 MB</span>
                             <span id="buf-hires-tag" style="display:none; color:#ff85c0; font-size:10px; margin-left:6px; border:1px solid #ff85c0; border-radius:3px; padding:0 3px;">Hi-Res 免干预</span>
+                        </span>
+                    </div>
+                    <div class="info-line" id="buf-line-video" style="display:flex; align-items:center; flex-wrap:wrap;">
+                        <span class="info-title" style="color:#999; margin-right:8px;">视频:</span>
+                        <span class="info-data" style="font-weight:bold; display:inline-flex; align-items:center;">
+                            <span id="buf-video-val" style="transition:color 0.2s;">0 MB + 0 MB = 0 MB</span>
+                            <span style="color:#666; margin:0 3px;">/</span>
+                            <span id="buf-video-limit" style="color:#888;">0 MB</span>
+                        </span>
+                    </div>
+                    <div class="info-line" id="buf-line-audio" style="display:flex; align-items:center; flex-wrap:wrap;">
+                        <span class="info-title" style="color:#999; margin-right:8px;">音频:</span>
+                        <span class="info-data" style="font-weight:bold; display:inline-flex; align-items:center;">
+                            <span id="buf-audio-val" style="transition:color 0.2s;">0 MB</span>
+                            <span style="color:#666; margin:0 3px;">/</span>
+                            <span id="buf-audio-limit" style="color:#888;">0 MB</span>
                         </span>
                     </div>
                 `;
@@ -1142,47 +1160,100 @@
                 container.appendChild(panel);
                 UIManager.statsPanelRef = panel;
                 UIManager.cachedStatsElements = {
+                    lineCache: panel.querySelector('#buf-line-cache'),
+                    lineVideo: panel.querySelector('#buf-line-video'),
+                    lineAudio: panel.querySelector('#buf-line-audio'),
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
-                    memCur: panel.querySelector('#buf-mem-cur'),
-                    memTar: panel.querySelector('#buf-mem-tar'),
-                    hiresTag: panel.querySelector('#buf-hires-tag')
+                    videoVal: panel.querySelector('#buf-video-val'),
+                    videoLimit: panel.querySelector('#buf-video-limit'),
+                    audioVal: panel.querySelector('#buf-audio-val'),
+                    audioLimit: panel.querySelector('#buf-audio-limit'),
+                    hiresTag: panel.querySelector('#buf-hires-tag'),
+                    memCur: panel.querySelector('#buf-video-val'),
+                    memTar: panel.querySelector('#buf-video-limit')
                 };
-            } else if (panel !== UIManager.statsPanelRef || !UIManager.cachedStatsElements || !UIManager.cachedStatsElements.timeCur) {
+            } else if (panel !== UIManager.statsPanelRef || !UIManager.cachedStatsElements || !UIManager.cachedStatsElements.timeCur || !UIManager.cachedStatsElements.videoVal || !UIManager.cachedStatsElements.audioVal) {
                 UIManager.statsPanelRef = panel;
                 UIManager.cachedStatsElements = {
+                    lineCache: panel.querySelector('#buf-line-cache'),
+                    lineVideo: panel.querySelector('#buf-line-video'),
+                    lineAudio: panel.querySelector('#buf-line-audio'),
                     timeCur: panel.querySelector('#buf-time-cur'),
                     timeTar: panel.querySelector('#buf-time-tar'),
-                    memCur: panel.querySelector('#buf-mem-cur'),
-                    memTar: panel.querySelector('#buf-mem-tar'),
-                    hiresTag: panel.querySelector('#buf-hires-tag')
+                    videoVal: panel.querySelector('#buf-video-val'),
+                    videoLimit: panel.querySelector('#buf-video-limit'),
+                    audioVal: panel.querySelector('#buf-audio-val'),
+                    audioLimit: panel.querySelector('#buf-audio-limit'),
+                    hiresTag: panel.querySelector('#buf-hires-tag'),
+                    memCur: panel.querySelector('#buf-video-val'),
+                    memTar: panel.querySelector('#buf-video-limit')
                 };
             }
 
             const el = UIManager.cachedStatsElements;
             if (!el || !el.timeCur) return;
 
-            const isHealthy = stats.time.current > 10 && stats.time.percent > 30;
-            el.timeCur.textContent = Utils.formatTime(stats.time.current);
-            el.timeCur.style.color = isHealthy ? '#52c41a' : '#faad14';
-            el.timeTar.textContent = Utils.formatTime(stats.time.target);
+            const totalActiveBytes = stats.memory.hasActual ? (stats.memory.actualTotalActive ?? 0) : (stats.memory.current ?? 0);
+            const totalVideoBytes = stats.memory.hasActual ? (stats.memory.actualTotalVideo ?? 0) : (stats.memory.current ?? 0);
+            const totalAudioBytes = stats.memory.hasActual ? (stats.memory.actualTotalAudio ?? 0) : 0;
 
-            if (stats.memory.hasActual) {
-                el.memCur.textContent = Utils.formatSize(stats.memory.actualCurrent);
-                let tooltip = `物理实测: 前向 ${Utils.formatSize(stats.memory.actualCurrent)} (V:${Utils.formatSize(stats.memory.actualVideo)} A:${Utils.formatSize(stats.memory.actualAudio)})`;
-                if (stats.memory.actualPastTotal > 0) {
-                    tooltip += ` | 回退未清理: ${Utils.formatSize(stats.memory.actualPastTotal)}`;
-                }
-                tooltip += ` | MSE总活跃: ${Utils.formatSize(stats.memory.actualTotalActive)} / 上限 ${Utils.formatSize(stats.memory.limit)} (估算: ${Utils.formatSize(stats.memory.current)})`;
-                el.memCur.title = tooltip;
-            } else {
-                el.memCur.textContent = Utils.formatSize(stats.memory.current);
-                el.memCur.title = `估算内存: ${Utils.formatSize(stats.memory.current)}`;
-            }
+            const totalLimit = CONFIG.SAFE_BYTE_LIMIT || (135 * 1024 * 1024);
+            const videoLimit = CONFIG.SAFE_VIDEO_BYTE_LIMIT || (125 * 1024 * 1024);
+            const audioLimit = CONFIG.SAFE_AUDIO_BYTE_LIMIT || Math.round(9.5 * 1024 * 1024);
 
-            el.memTar.textContent = Utils.formatSize(stats.memory.limit);
-            el.memTar.title = `安全内存上限: ${Utils.formatSize(stats.memory.limit)}`;
+            const totalRatio = totalLimit > 0 ? (totalActiveBytes / totalLimit) : 0;
+            const videoRatio = videoLimit > 0 ? (totalVideoBytes / videoLimit) : 0;
+            const audioRatio = audioLimit > 0 ? (totalAudioBytes / audioLimit) : 0;
+            const maxRatio = Math.max(totalRatio, videoRatio, audioRatio);
+
+            const bufferColor = Utils.getColorByRatio(maxRatio);
+            const videoColor = Utils.getColorByRatio(videoRatio);
+            const audioColor = Utils.getColorByRatio(audioRatio);
+
+            // Line 1: 缓存
+            const timeCurStr = Utils.formatTime(stats.time.current);
+            const timeTarStr = Utils.formatTime(stats.time.target);
+            el.timeCur.textContent = timeCurStr;
+            el.timeCur.style.color = bufferColor;
+            el.timeTar.textContent = timeTarStr;
+            el.timeCur.title = `前向缓冲时长: ${timeCurStr} / 目标: ${timeTarStr}`;
+            el.timeTar.title = `目标缓冲时长: ${timeTarStr}`;
             el.hiresTag.style.display = stats.hiRes ? 'inline' : 'none';
+
+            // Line 2: 视频
+            let pastVideo, forwardVideo, totalVideo;
+            if (stats.memory.hasActual) {
+                pastVideo = Utils.formatSize(stats.memory.actualPastVideo);
+                forwardVideo = Utils.formatSize(stats.memory.actualVideo);
+                totalVideo = Utils.formatSize(stats.memory.actualTotalVideo);
+            } else {
+                pastVideo = '0 MB';
+                forwardVideo = Utils.formatSize(stats.memory.current);
+                totalVideo = forwardVideo;
+            }
+            const totalLimitStr = Utils.formatSize((stats.memory && stats.memory.limit) || totalLimit);
+            el.videoVal.textContent = `${pastVideo} + ${forwardVideo} = ${totalVideo}`;
+            el.videoVal.style.color = videoColor;
+            el.videoVal.title = `回退未清理: ${pastVideo} | 前向连续: ${forwardVideo} | 视频总活跃: ${totalVideo}`;
+            el.videoLimit.textContent = totalLimitStr;
+            el.videoLimit.title = `安全内存上限: ${totalLimitStr}`;
+
+            // Line 3: 音频
+            let totalAudio;
+            if (stats.memory.hasActual) {
+                totalAudio = Utils.formatSize(stats.memory.actualTotalAudio);
+            } else {
+                totalAudio = '0 MB';
+            }
+            const audioLimitStr = Utils.formatSize(audioLimit);
+            el.audioVal.textContent = totalAudio;
+            el.audioVal.style.color = audioColor;
+            el.audioVal.title = stats.memory.hasActual
+                ? `音频: 回退 ${Utils.formatSize(stats.memory.actualPastAudio)} + 前向 ${Utils.formatSize(stats.memory.actualAudio)} = 总活跃 ${totalAudio}`
+                : `音频安全上限: ${audioLimitStr}`;
+            el.audioLimit.textContent = audioLimitStr;
+            el.audioLimit.title = `音频安全上限: ${audioLimitStr}`;
         },
 
         ensureStyles: () => {
@@ -1226,7 +1297,7 @@
                     padding: 1px 5px;
                     box-sizing: border-box;
                     white-space: nowrap;
-                    transition: background 0.2s, border-color 0.2s;
+                    transition: color 0.2s, background 0.2s, border-color 0.2s;
                 }
                 #bili-buffer-badge:hover #bili-buffer-badge-text {
                     background: rgba(0, 174, 236, 0.22);
@@ -1300,17 +1371,37 @@
                 UIManager.badgeTextRef = badge.querySelector('#bili-buffer-badge-text');
             }
 
+            const totalActiveBytes = stats.memory.hasActual ? (stats.memory.actualTotalActive ?? 0) : (stats.memory.current ?? 0);
+            const totalVideoBytes = stats.memory.hasActual ? (stats.memory.actualTotalVideo ?? 0) : (stats.memory.current ?? 0);
+            const totalAudioBytes = stats.memory.hasActual ? (stats.memory.actualTotalAudio ?? 0) : 0;
+
+            const totalLimit = CONFIG.SAFE_BYTE_LIMIT || (135 * 1024 * 1024);
+            const videoLimit = CONFIG.SAFE_VIDEO_BYTE_LIMIT || (125 * 1024 * 1024);
+            const audioLimit = CONFIG.SAFE_AUDIO_BYTE_LIMIT || Math.round(9.5 * 1024 * 1024);
+
+            const totalRatio = totalLimit > 0 ? (totalActiveBytes / totalLimit) : 0;
+            const videoRatio = videoLimit > 0 ? (totalVideoBytes / videoLimit) : 0;
+            const audioRatio = audioLimit > 0 ? (totalAudioBytes / audioLimit) : 0;
+            const maxRatio = Math.max(totalRatio, videoRatio, audioRatio);
+
+            const badgeColor = Utils.getColorByRatio(maxRatio);
+
             if (UIManager.badgeTextRef) {
                 UIManager.badgeTextRef.textContent = `⚡${Utils.formatTime(stats.time.current)}`;
+                UIManager.badgeTextRef.style.color = badgeColor;
             }
 
-            let memTooltip;
-            if (stats.memory.hasActual) {
-                memTooltip = `⏪ ${Utils.formatSize(stats.memory.actualPastTotal)} + ⏩ ${Utils.formatSize(stats.memory.actualCurrent)} = ${Utils.formatSize(stats.memory.actualTotalActive)} / ${Utils.formatSize(stats.memory.limit)}`;
-            } else {
-                memTooltip = `⏩ ${Utils.formatSize(stats.memory.current)} / ${Utils.formatSize(stats.memory.limit)}`;
+            const timeCur = Utils.formatTime(stats.time.current);
+            const timeTar = Utils.formatTime(stats.time.target);
+            const memLimit = Utils.formatSize((stats.memory && stats.memory.limit) || totalLimit);
+            const memSize = stats.memory.hasActual
+                ? Utils.formatSize(stats.memory.actualTotalActive)
+                : Utils.formatSize(stats.memory.current);
+
+            badge.title = `${timeCur} / ${timeTar} | ${memSize} / ${memLimit}`;
+            if (UIManager.badgeTextRef) {
+                UIManager.badgeTextRef.title = badge.title;
             }
-            badge.title = `⚡${Utils.formatTime(stats.time.current)} / ${Utils.formatTime(stats.time.target)} | ${memTooltip}`;
         },
 
         update: () => {
