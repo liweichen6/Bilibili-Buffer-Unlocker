@@ -13,7 +13,7 @@ async function sleep(ms) {
 }
 
 async function runCDPTest() {
-    console.log('=== Starting Live CDP Verification for v3.3-beta ===');
+    console.log('=== Starting Live CDP Verification for v3.3 ===');
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-bili-cdp-'));
     console.log(`Using user data dir: ${tempDir}`);
 

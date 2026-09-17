@@ -1,10 +1,10 @@
-// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.3-beta
+// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.3
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-console.log('--- Running Automated Unit Tests for v3.3-beta ---');
+console.log('--- Running Automated Unit Tests for v3.3 ---');
 
 // Setup mock browser environment
 class MockTimeRanges {

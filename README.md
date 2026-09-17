@@ -2,7 +2,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
-[![Version](https://img.shields.io/badge/Release-v3.3--beta-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Version](https://img.shields.io/badge/Release-v3.3-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#-安装指南--installation)
 
@@ -128,7 +128,7 @@ $$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVid
 2. **音频轨内存消耗** $\le 8\text{ MiB}$（低于 Chromium 12 MiB 硬顶，预留 4 MiB 安全余量）；
 3. **综合内存消耗** $\le 118\text{ MiB}$（低于 162 MB 合计硬顶，预留 44 MB 安全余量）。
 
-### 4. v3.3-beta 架构突破：实时分片追踪引擎与闭环物理内存调控 (Real-Time Chunk Tracking & Closed-Loop Budgeting)
+### 4. v3.3 架构突破：实时分片追踪引擎与闭环物理内存调控 (Real-Time Chunk Tracking & Closed-Loop Budgeting)
 
 ```
 [ Bilibili DASH Loader (fMP4 / m4s) ]
@@ -185,7 +185,7 @@ $$\text{safeSeconds} = \max\left(20,\; \min(\text{safeAudioSec},\; \text{safeVid
 - 此时若再拉取新分片，直接冲破 Chromium 150 MiB 视频硬顶，触发底层强制 GC 清空，导致前向缓冲大面积崩塌。
 
 #### 核心突破：全量物理账本与动态净空呼吸流控
-v3.3-beta 实现了全量活跃物理账本追踪与基于回退状态的动态净空流控：
+v3.3 实现了全量活跃物理账本追踪与基于回退状态的动态净空流控：
 1. **双视角全息物理核算**：
    $$\text{totalVideoBytes} = \sum_{\text{videoLedger}} \text{chunk.bytes} = \text{pastVideoBytes} + \text{forwardVideoBytes} + \text{unevictedChunks}$$
    对每一分片精确按时序切分为回退段 $[start, \min(end, currentTime)]$ 与前向段 $[\max(start, currentTime), end]$，实时计算全局真实占用。
@@ -237,7 +237,7 @@ const CONFIG = {
 
 ### 🚀 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
 
-#### v3.3-beta (2026-09) - *里程碑升级：MSE 分片实时物理追踪、全量活跃总账本与闭环防爆架构*
+#### v3.3 (2026-09) - *里程碑升级：MSE 分片实时物理追踪、全量活跃总账本与闭环防爆架构*
 - 📦 **全量活跃物理分片追踪引擎 (`ChunkTracker`)**：
   - 底层拦截 `MediaSource.prototype.addSourceBuffer`，精准标记音视频分片轨属（`video` / `audio`）；
   - 拦截 `SourceBuffer.prototype.appendBuffer`，监听 `updateend` 并使用时序差分算法提取分片物理大小（`data.byteLength`）与时序区间 $[start, end]$，记录物理分片账本；
@@ -321,14 +321,14 @@ const CONFIG = {
 
 ## 📥 安装指南 / Installation
 
-### 途径一：本仓库持续维护版（v3.3-beta+ 推荐）
+### 途径一：本仓库持续维护版（v3.3+ 推荐）
 
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
 2. 点击下方链接一键安装最新重构版：
-   - 👉 **[安装 v3.3-beta+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - 👉 **[安装 v3.3+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
    - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
 
 ### 途径二：Greasy Fork 原版（v2.2 基础归档）
