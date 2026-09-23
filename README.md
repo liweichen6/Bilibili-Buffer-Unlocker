@@ -10,13 +10,77 @@
 
 ---
 
+> [!IMPORTANT]
+> ### 🤖 维护声明 / Maintenance Notice
+> 本项目自 **v3.0** 起完全由 **Google DeepMind 的 Gemini (Antigravity)** 进行全权架构设计、代码实现、数学推导、测试验证与持续演进维护。
+
 > [!NOTE]
 > ### 📌 项目渊源与 Fork 持续维护说明 (Lineage & Fork Notice)
 > 本项目 **Fork 自 Greasy Fork 上的开源用户脚本 [Bilibili Buffer Unlocker(B站缓冲解限)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)**，原始创作者为 [**\7.**](https://greasyfork.org/zh-CN/users/1507253-7)（在 Greasy Fork 上发布了 v1.0 至 v2.2 版本）。
 > 
-> 由于上游原版脚本后续停更，本项目在此基础上建立独立仓库进行**持续演进与深度现代化重构**。自 **v3.0** 起，所有关键 Bug 修复（离散区间计算错误、只读解耦等）、Chromium MSE 内存防爆机制升级、无损 DOM 引擎以及双 UI 控制栏集成均由本仓库（[`liweichen6/Bilibili-Buffer-Unlocker`](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)）独立维护并继续开发。
+> 由于上游原版脚本后续停更，本项目在此基础上建立独立仓库进行**持续演进与深度现代化重构**。自 **v3.0** 起，所有关键 Bug 修复（离散区间计算错误、只读解耦等）、Chromium MSE 内存防爆机制升级、无损 DOM 引擎以及双 UI 控制栏集成均由本仓库（[`liweichen6/Bilibili-Buffer-Unlocker`](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)）基于 Gemini 独立维护并继续开发。
 > 
 > 衷心感谢原作者 `\7.` 早期开拓性的设计灵感与代码贡献！
+
+---
+
+## 📑 目录 / Table of Contents
+
+- 🚀 [更佳体验推荐：Bilibili-thread-ripper (解决卡顿的更优解)](#-更佳体验推荐bilibili-thread-ripper-解决卡顿的更优解)
+- 📖 [简介 / Overview](#-简介--overview)
+- ✨ [核心特性 / Features](#-核心特性--features)
+- 🧠 [技术原理深度解析 / Technical Deep-Dive](#-技术原理深度解析--technical-deep-dive)
+  - [1. 为什么不能无脑调大内存？“161 MB” 崩溃陷阱解析](#1-为什么不能无脑调大内存161-mb-崩溃陷阱解析)
+  - [2. 黄金法则：为什么默认预设 120 MB？](#2-黄金法则为什么默认预设-120-mb)
+  - [3. v3.2 架构升级：音视频双配额隔离安全模型](#3-v32-架构升级音视频双配额隔离安全模型-dual-quota-safety-budget)
+  - [4. v3.3 架构突破：实时分片追踪引擎与闭环物理内存调控](#4-v33-架构突破实时分片追踪引擎与闭环物理内存调控-real-time-chunk-tracking--closed-loop-budgeting)
+  - [5. 全量活跃总账本与回退缓冲动态净空调节](#5-全量活跃总账本与回退缓冲动态净空调节-total-active-ledger--dynamic-back-buffer-regulation)
+- 🛠️ [配置说明 / Configuration](#️-配置说明--configuration)
+- 📊 [实测数据 (基于 BV19Q4y1x7nw)](#-实测数据-基于-bv19q4y1x7nw)
+- 📝 [版本更新历史 / Changelog](#-版本更新历史--changelog)
+- 📥 [安装指南 / Installation](#-安装指南--installation)
+- 📜 [许可证 / License](#-许可证--license)
+
+---
+
+## 🚀 更佳体验推荐：Bilibili-thread-ripper (解决卡顿的更优解)
+
+在绝大多数日常播放场景中，我们**更推荐优先使用**开源项目 [**Bilibili-thread-ripper (线程撕裂者)**](https://github.com/MrTangLuyao/Bilibili-thread-ripper)。
+
+### 1. 为什么更推荐 Bilibili-thread-ripper？（治本 vs 治标）
+
+| 对比维度 | Bilibili Buffer Unlocker（本脚本） | Bilibili-thread-ripper（更推荐） |
+| :--- | :--- | :--- |
+| **解决的核心矛盾** | **水库蓄水容量（容量上限）** | **注水进水流速（网络带宽利用率）** |
+| **工作机制** | 命令播放器将前向缓冲上限从官方 20s 提升至 **600s（10分钟）**，配合 MSE 物理内存防爆。 | 劫持网络层分片拉取，将音视频分片拆分为多个 HTTP Range **多线程并发拉取**（默认 8~16 线程），并支持多 CDN 故障转移。 |
+| **对卡顿的解决效果** | **无法提升单流网络速度**。如果用户当前网络较慢或对 B 站 CDN 波动，水库再大也无法及时蓄满水，依然会卡顿；且在 4K 或高码率音频下受限于浏览器 150M/12M 硬顶，缓冲时长受配额制约。 | **从传输层根本消除卡顿**。多线程并发能瞬间跑满宽带，即便维持 20~45s 的短缓冲也能做到 4K 拖拽秒开、即点即播。 |
+| **浏览器内存占用** | 需常驻消耗 **60 ~ 135 MB** 的 MSE 物理内存，依赖防爆机制避开 Chromium GC 陷阱。 | 内存占用极低（仅数十 MB），轻量且对低配设备极其友好。 |
+
+> [!TIP]
+> **结论**：视频播放卡顿的根本原因绝大多数是**“网速跟不上”**而非“缓冲池不够深”。优先使用 [Bilibili-thread-ripper](https://github.com/MrTangLuyao/Bilibili-thread-ripper) 能从源头彻底解决加载慢的问题。
+
+---
+
+### 2. 强强联合：双脚本协同必须开启「兼容模式」
+
+如果你希望兼得 **BTR 的多线程极速拉流** 与 **本脚本的超长离线级缓冲池**（例如网络偶尔剧烈波动、希望暂停片刻后将后续几分钟全部预载到内存），两者**完全可以共存协同**，但**必须将 BTR 设置为「兼容模式」**：
+
+#### ⚠️ 为什么必须开启兼容模式？
+- **BTR 默认「全接管模式」**：BTR 会完全替换 B 站原生播放内核并自建 `MediaSource`，其内部代码强制将前向缓冲锁死为 **45 秒**（`bufferAheadSeconds: 45`）。在此模式下，本脚本发送的 600s 扩容指令无法作用于 BTR 内部管道，导致超长扩容失效。
+- **BTR「兼容模式」**：BTR 仅在网络层提供多线程 Range 分发，流媒体装配与缓冲策略放权回 B 站原生 Dash 引擎。此时本脚本能顺利将缓冲池上限推升至数分钟，二者形成**“BTR 负责极速搬运分片，本脚本负责超长缓冲与物理防爆”**的极致协同。
+
+#### ⚙️ 配置步骤
+1. 打开任意 B 站视频页；
+2. 点击 Tampermonkey 脚本扩展菜单中的 **“线程撕裂者设置”**（或点击播放器控制栏右下角齿轮 ⚙ → **自定义/线程撕裂者**）；
+3. 在弹出的设置面板中，将 **“接管方式”** 从“全接管”更改为 **“兼容模式”**；
+4. 线程数保持推荐的 `8` 或 `16`，保存后刷新页面即可生效。
+
+#### 🧪 实测验证版本组合
+经两项目联合实测与深度调用链路检验，以下版本组合经过严格兼容性验证：
+- **Bilibili-thread-ripper**: `v0.9.2.3`
+- **Bilibili-Buffer-Unlocker**: `v3.3`
+
+**验证协同生效方式**：在视频画面右键单击 → **视频统计信息**，确认第一行 `Player Type` 显示为 **`BTR Native (兼容模式)`**，且控制栏左下角的闪电微标 `⚡` 能平滑突破 45 秒并延伸至数分钟。
 
 ---
 
