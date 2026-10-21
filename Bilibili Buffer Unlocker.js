@@ -3,7 +3,7 @@
 // @name:zh      B站缓冲解限
 // @name:en      Bilibili Buffer Unlocker
 // @namespace    https://github.com/liweichen6/Bilibili-Buffer-Unlocker
-// @version      3.3
+// @version      3.4
 // @description  Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI. 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:zh 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:en Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI
@@ -39,7 +39,7 @@
     const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
     const Utils = {
-        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.3',
+        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.4',
 
         formatTime: (s) => {
             if (!Number.isFinite(s) || s < 0) return '0s';
@@ -118,6 +118,10 @@
         audioLedger: [],
         MAX_LEDGER_ENTRIES: 500,
         _seq: 0,
+        _activeMediaSource: null,
+        _generation: 0,
+        _resetCount: 0,
+        _pendingMediaSourceReset: false,
 
         // 便捷只读属性：获取当前总活跃/前向/回退物理内存
         get totalVideoBytes() {
@@ -167,47 +171,88 @@
             if (!after || after.length === 0) return null;
             if (!before || before.length === 0) {
                 const last = after[after.length - 1];
-                return { start: last.start, end: last.end, duration: last.end - last.start };
+                const dur = last.end - last.start;
+                return {
+                    start: last.start,
+                    end: last.end,
+                    duration: dur,
+                    uncoveredDuration: dur,
+                    segments: [{ start: last.start, end: last.end, duration: dur }]
+                };
             }
 
             for (let i = 0; i < after.length; i++) {
                 const a = after[i];
-                const overlapping = before.filter(b => Math.max(a.start, b.start) < Math.min(a.end, b.end) + 0.05);
+                const overlapping = before
+                    .filter(b => Math.max(a.start, b.start) < Math.min(a.end, b.end) + 0.05)
+                    .sort((x, y) => x.start - y.start);
 
                 if (overlapping.length === 0) {
-                    return { start: a.start, end: a.end, duration: a.end - a.start };
+                    const dur = a.end - a.start;
+                    return {
+                        start: a.start,
+                        end: a.end,
+                        duration: dur,
+                        uncoveredDuration: dur,
+                        segments: [{ start: a.start, end: a.end, duration: dur }]
+                    };
                 }
 
-                const maxBeforeEnd = Math.max(...overlapping.map(b => b.end));
-                const minBeforeStart = Math.min(...overlapping.map(b => b.start));
-
-                // 两侧同时扩展（例如质量切换覆盖或大跨度关键帧段）
-                if (a.start < minBeforeStart - 0.05 && a.end > maxBeforeEnd + 0.05) {
-                    return { start: a.start, end: a.end, duration: a.end - a.start };
-                }
-
-                // 右侧扩展（最常见的顺序流式加载）
-                if (a.end > maxBeforeEnd + 0.05) {
-                    const start = Math.max(a.start, maxBeforeEnd);
-                    return { start, end: a.end, duration: a.end - start };
-                }
-
-                // 左侧扩展
-                if (a.start < minBeforeStart - 0.05) {
-                    const end = Math.min(a.end, minBeforeStart);
-                    return { start: a.start, end, duration: end - a.start };
-                }
-
-                // 缝隙填充
-                if (overlapping.length >= 2) {
-                    overlapping.sort((x, y) => x.start - y.start);
-                    for (let j = 0; j < overlapping.length - 1; j++) {
-                        const gapStart = overlapping[j].end;
-                        const gapEnd = overlapping[j + 1].start;
-                        if (gapEnd > gapStart + 0.05) {
-                            return { start: gapStart, end: gapEnd, duration: gapEnd - gapStart };
+                // 合并 before 中彼此紧邻或重叠的区间
+                const mergedBefore = [];
+                for (let j = 0; j < overlapping.length; j++) {
+                    const cur = overlapping[j];
+                    if (mergedBefore.length === 0) {
+                        mergedBefore.push({ start: cur.start, end: cur.end });
+                    } else {
+                        const prev = mergedBefore[mergedBefore.length - 1];
+                        if (cur.start <= prev.end + 0.05) {
+                            prev.end = Math.max(prev.end, cur.end);
+                        } else {
+                            mergedBefore.push({ start: cur.start, end: cur.end });
                         }
                     }
+                }
+
+                const minBeforeStart = mergedBefore[0].start;
+                const maxBeforeEnd = mergedBefore[mergedBefore.length - 1].end;
+
+                // 计算 a 相对于 mergedBefore 新增的所有未覆盖子区间（左扩、中间桥接空隙、右扩）
+                const segments = [];
+                if (a.start < minBeforeStart - 0.05) {
+                    const end = Math.min(a.end, minBeforeStart);
+                    if (end - a.start > 0.05) {
+                        segments.push({ start: a.start, end, duration: end - a.start });
+                    }
+                }
+
+                for (let j = 0; j < mergedBefore.length - 1; j++) {
+                    const gapStart = Math.max(a.start, mergedBefore[j].end);
+                    const gapEnd = Math.min(a.end, mergedBefore[j + 1].start);
+                    if (gapEnd > gapStart + 0.05) {
+                        segments.push({ start: gapStart, end: gapEnd, duration: gapEnd - gapStart });
+                    }
+                }
+
+                if (a.end > maxBeforeEnd + 0.05) {
+                    const start = Math.max(a.start, maxBeforeEnd);
+                    if (a.end - start > 0.05) {
+                        segments.push({ start, end: a.end, duration: a.end - start });
+                    }
+                }
+
+                if (segments.length > 0) {
+                    const firstSeg = segments[0];
+                    const lastSeg = segments[segments.length - 1];
+                    const spanDuration = lastSeg.end - firstSeg.start;
+                    const uncoveredDuration = segments.reduce((sum, s) => sum + s.duration, 0);
+                    return {
+                        start: firstSeg.start,
+                        end: lastSeg.end,
+                        duration: spanDuration,
+                        uncoveredDuration,
+                        segments
+                    };
                 }
             }
 
@@ -571,6 +616,14 @@
             ChunkTracker.videoLedger.length = 0;
             ChunkTracker.audioLedger.length = 0;
             ChunkTracker._seq = 0;
+            ChunkTracker._generation++;
+            ChunkTracker._resetCount++;
+            ChunkTracker._pendingMediaSourceReset = false;
+            if (typeof CoreManager !== 'undefined' && CoreManager) {
+                CoreManager._videoThrottled = false;
+                CoreManager._audioThrottled = false;
+                CoreManager._totalThrottled = false;
+            }
         },
 
         // 初始化拦截钩子
@@ -591,13 +644,31 @@
                             ? data.byteLength
                             : (typeof data?.buffer?.byteLength === 'number' ? data.buffer.byteLength : 0);
                         const rangesBefore = ChunkTracker.snapshotRanges(sb.buffered);
+                        const genAtAppend = ChunkTracker._generation;
 
                         const onUpdateEnd = () => {
                             try {
+                                if (genAtAppend !== ChunkTracker._generation || sb.__detached || sb.__mediaSource?.__detached) return;
                                 const rangesAfter = ChunkTracker.snapshotRanges(sb.buffered);
                                 const diff = ChunkTracker.diffRanges(rangesBefore, rangesAfter);
                                 if (diff && diff.duration > 0.02) {
-                                    ChunkTracker.recordChunk(track, diff.start, diff.end, byteLength);
+                                    const segs = Array.isArray(diff.segments) && diff.segments.length > 0
+                                        ? diff.segments
+                                        : [{ start: diff.start, end: diff.end, duration: diff.duration }];
+                                    if (segs.length === 1) {
+                                        ChunkTracker.recordChunk(track, segs[0].start, segs[0].end, byteLength);
+                                    } else {
+                                        const totalSegDur = diff.uncoveredDuration || segs.reduce((sum, s) => sum + s.duration, 0);
+                                        let remainingBytes = byteLength;
+                                        for (let k = 0; k < segs.length; k++) {
+                                            const s = segs[k];
+                                            const segBytes = (k === segs.length - 1)
+                                                ? remainingBytes
+                                                : Math.max(1, Math.round(byteLength * (s.duration / totalSegDur)));
+                                            remainingBytes = Math.max(0, remainingBytes - segBytes);
+                                            ChunkTracker.recordChunk(track, s.start, s.end, segBytes);
+                                        }
+                                    }
                                 }
                             } catch {}
                         };
@@ -614,11 +685,15 @@
                     const origRemove = SBProto.remove;
                     if (origRemove && !origRemove.__hooked) {
                         SBProto.remove = function (start, end) {
+                            // 先行调用底层原生 remove，若抛出异常（如 InvalidAccessError / InvalidStateError）则不污染账本
+                            const ret = origRemove.apply(this, arguments);
                             try {
-                                const track = this.__trackType || 'video';
-                                ChunkTracker.onRemove(track, Number(start), Number(end));
+                                if (!this.__detached && !this.__mediaSource?.__detached) {
+                                    const track = this.__trackType || 'video';
+                                    ChunkTracker.onRemove(track, Number(start), Number(end));
+                                }
                             } catch {}
-                            return origRemove.apply(this, arguments);
+                            return ret;
                         };
                         SBProto.remove.__hooked = true;
                     }
@@ -631,6 +706,19 @@
                         MS.prototype.addSourceBuffer = function (mimeType) {
                             const sb = origAddSourceBuffer.apply(this, arguments);
                             try {
+                                if (ChunkTracker._activeMediaSource && ChunkTracker._activeMediaSource !== this) {
+                                    ChunkTracker._activeMediaSource.__detached = true;
+                                    ChunkTracker.reset();
+                                    ChunkTracker._pendingMediaSourceReset = true;
+                                    if (typeof CoreManager !== 'undefined' && CoreManager) {
+                                        CoreManager._lastAppliedTarget = null;
+                                        CoreManager._hiResLogged = false;
+                                    }
+                                }
+                                ChunkTracker._activeMediaSource = this;
+                                this.__detached = false;
+                                sb.__mediaSource = this;
+                                sb.__detached = false;
                                 const lower = String(mimeType || '').toLowerCase();
                                 sb.__trackType = lower.includes('video') ? 'video' : (lower.includes('audio') ? 'audio' : 'unknown');
                                 hookSourceBufferProto(sb.constructor?.prototype || targetWin.SourceBuffer?.prototype);
@@ -638,6 +726,20 @@
                             return sb;
                         };
                         MS.prototype.addSourceBuffer.__hooked = true;
+                    }
+
+                    if (MS && MS.prototype && MS.prototype.removeSourceBuffer && !MS.prototype.removeSourceBuffer.__hooked) {
+                        const origRemoveSourceBuffer = MS.prototype.removeSourceBuffer;
+                        MS.prototype.removeSourceBuffer = function (sb) {
+                            const ret = origRemoveSourceBuffer.apply(this, arguments);
+                            try {
+                                if (sb && typeof sb === 'object') {
+                                    sb.__detached = true;
+                                }
+                            } catch {}
+                            return ret;
+                        };
+                        MS.prototype.removeSourceBuffer.__hooked = true;
                     }
 
                     if (targetWin.SourceBuffer && targetWin.SourceBuffer.prototype) {
@@ -657,6 +759,10 @@
         _lastVideoSrc: '',
         _lastAppliedTarget: null,
         _hiResLogged: false,
+        _lastSyncedResetCount: 0,
+        _videoThrottled: false,
+        _audioThrottled: false,
+        _totalThrottled: false,
 
         // 统一获取播放器内核实例
         getCore: () => {
@@ -844,8 +950,11 @@
 
             const safeVideoSec = effectiveVideoBps > 0 ? (CONFIG.SAFE_VIDEO_BYTE_LIMIT / effectiveVideoBps) : CONFIG.MAX_TIME_LIMIT;
             const safeAudioSec = effectiveAudioBps > 0 ? (CONFIG.SAFE_AUDIO_BYTE_LIMIT / effectiveAudioBps) : CONFIG.MAX_TIME_LIMIT;
+            const safeTotalSec = (CONFIG.SAFE_BYTE_LIMIT > 0 && effectiveTotalBps > 0)
+                ? (CONFIG.SAFE_BYTE_LIMIT / effectiveTotalBps)
+                : CONFIG.MAX_TIME_LIMIT;
 
-            let safeSeconds = Math.min(safeAudioSec, safeVideoSec, CONFIG.MAX_TIME_LIMIT);
+            let safeSeconds = Math.min(safeAudioSec, safeVideoSec, safeTotalSec, CONFIG.MAX_TIME_LIMIT);
 
             // 闭环双视角物理内存调控 (Closed-Loop Dual-Perspective Regulation)
             const video = document.querySelector('video');
@@ -858,18 +967,37 @@
             const totalActiveBytes = actual?.totalActiveBytes ?? (totalVideoBytes + totalAudioBytes);
             const currentBuffered = CoreManager.getBufferedAhead(video);
 
-            // 检查全局总活跃物理内存、单轨总活跃与前向物理内存是否触及安全阈值的 90% 红线
-            const isVideoNearLimit = totalVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90 ||
-                                     forwardVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90;
-            const isAudioNearLimit = totalAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90 ||
-                                     forwardAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90;
-            const isTotalNearLimit = (CONFIG.SAFE_BYTE_LIMIT > 0) && (
-                                     totalActiveBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90 ||
-                                     forwardTotalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90
-            );
+            // 施密特触发器迟滞带：达 90% 红线触发限流锁死，降至 85% 以下才解除限流恢复净空公式，消除 90% 临界高频震荡
+            const peakVideoBytes = Math.max(totalVideoBytes, forwardVideoBytes);
+            const peakAudioBytes = Math.max(totalAudioBytes, forwardAudioBytes);
+            const peakTotalBytes = Math.max(totalActiveBytes, forwardTotalBytes);
 
-            if (isVideoNearLimit || isAudioNearLimit || isTotalNearLimit) {
-                // 当音视频任一物理内存达到安全上限 90% 时，强制限制目标缓冲至当前缓冲量，停止拉取新分片防止触发 GC 截断
+            if (peakVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) {
+                CoreManager._videoThrottled = true;
+            } else if (peakVideoBytes < CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.85) {
+                CoreManager._videoThrottled = false;
+            }
+
+            if (peakAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90) {
+                CoreManager._audioThrottled = true;
+            } else if (peakAudioBytes < CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.85) {
+                CoreManager._audioThrottled = false;
+            }
+
+            if (CONFIG.SAFE_BYTE_LIMIT > 0) {
+                if (peakTotalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90) {
+                    CoreManager._totalThrottled = true;
+                } else if (peakTotalBytes < CONFIG.SAFE_BYTE_LIMIT * 0.85) {
+                    CoreManager._totalThrottled = false;
+                }
+            } else {
+                CoreManager._totalThrottled = false;
+            }
+
+            const isNearLimit = CoreManager._videoThrottled || CoreManager._audioThrottled || CoreManager._totalThrottled;
+
+            if (isNearLimit) {
+                // 当音视频任一物理内存处于 90% 限流状态时，强制限制目标缓冲至当前缓冲量，停止拉取新分片防止触发 GC 截断
                 safeSeconds = Math.min(safeSeconds, Math.max(CONFIG.MIN_TIME_LIMIT, Math.floor(currentBuffered)));
             } else {
                 // 基于总活跃内存扣除后的动态剩余净空 (Headroom) 平滑调节允许的前向缓冲时长：
@@ -903,19 +1031,21 @@
                 const core = CoreManager.getCore();
                 if (!core) return;
 
-                // Hi-Res 音频遵循 B 站内置策略，若当前处于扩容高位主动重置，避免触发解码管道或 CDN 调度异常
+                // Hi-Res 音频遵循 B 站内置策略，仅在已处于扩容高位 (>30s) 或曾被脚本改写时主动重置，避免覆盖播放器原生低位策略 (如 15s/25s)
                 if (CoreManager.isHiRes()) {
                     if (typeof core.setStableBufferTime === 'function') {
                         const currentSetting = typeof core.getStableBufferTime === 'function' ? core.getStableBufferTime() : null;
-                        const needsReset = Number.isFinite(currentSetting)
-                            ? (currentSetting > 30 || currentSetting !== 20)
-                            : (CoreManager._lastAppliedTarget !== null && CoreManager._lastAppliedTarget !== 20);
+                        const prevApplied = CoreManager._lastAppliedTarget;
+                        const needsReset = (Number.isFinite(currentSetting) && currentSetting > 30) ||
+                                           (prevApplied !== null && prevApplied !== 20);
 
                         if (needsReset) {
+                            const fromText = Number.isFinite(currentSetting)
+                                ? `${currentSetting}s`
+                                : (prevApplied ? `${prevApplied}s` : '自定义配置');
                             core.setStableBufferTime(20);
                             CoreManager._lastAppliedTarget = 20;
                             if (!CoreManager._hiResLogged) {
-                                const fromText = Number.isFinite(currentSetting) ? `${currentSetting}s` : (CoreManager._lastAppliedTarget ? `${CoreManager._lastAppliedTarget}s` : '自定义配置');
                                 console.log(`[缓冲解限] 🎵 检测到 Hi-Res/杜比音质，缓冲从 ${fromText} 重置为默认策略 (20s)`);
                                 CoreManager._hiResLogged = true;
                             }
@@ -937,30 +1067,16 @@
                     const hasValidCurrent = Number.isFinite(currentSetting);
                     const effectiveSetting = hasValidCurrent ? currentSetting : CoreManager._lastAppliedTarget;
 
-                    const video = document.querySelector('video');
-                    const actual = ChunkTracker.getActualBufferedBytes(video);
-                    const totalVideoBytes = actual?.totalVideoBytes ?? actual?.videoBytes ?? 0;
-                    const totalAudioBytes = actual?.totalAudioBytes ?? actual?.audioBytes ?? 0;
-                    const forwardVideoBytes = actual?.forwardVideoBytes ?? actual?.videoBytes ?? 0;
-                    const forwardAudioBytes = actual?.forwardAudioBytes ?? actual?.audioBytes ?? 0;
-                    const totalActiveBytes = actual?.totalActiveBytes ?? (totalVideoBytes + totalAudioBytes);
-                    const forwardTotalBytes = actual?.forwardTotalBytes ?? actual?.totalBytes ?? (forwardVideoBytes + forwardAudioBytes);
-
-                    const isNearLimit = (totalVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
-                                        (forwardVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90) ||
-                                        (totalAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90) ||
-                                        (forwardAudioBytes >= CONFIG.SAFE_AUDIO_BYTE_LIMIT * 0.90) ||
-                                        (CONFIG.SAFE_BYTE_LIMIT > 0 && (
-                                            totalActiveBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90 ||
-                                            forwardTotalBytes >= CONFIG.SAFE_BYTE_LIMIT * 0.90
-                                        ));
+                    const isNearLimit = CoreManager._videoThrottled || CoreManager._audioThrottled || CoreManager._totalThrottled;
                     const isUrgentDownward = isNearLimit && (targetSeconds < effectiveSetting);
+                    const wasExternallyModified = hasValidCurrent && CoreManager._lastAppliedTarget !== null && currentSetting !== CoreManager._lastAppliedTarget;
 
-                    // 容差判定：当当前设置与目标不一致时，在未设置、升级至解限(>=30s)、差值超过容差死区或处于物理防爆紧急下调时更新
+                    // 容差判定：当当前设置与目标不一致时，在未设置、首次应用解限、外部重置当前值、差值超过容差死区或处于物理防爆紧急下调时更新
                     const shouldUpdate = force || (
                         effectiveSetting !== targetSeconds && (
                             !Number.isFinite(effectiveSetting) ||
-                            (effectiveSetting < 30 && targetSeconds >= 30) ||
+                            CoreManager._lastAppliedTarget === null ||
+                            wasExternallyModified ||
                             Math.abs(effectiveSetting - targetSeconds) >= CONFIG.HYSTERESIS_DELTA ||
                             isUrgentDownward
                         )
@@ -982,14 +1098,20 @@
         // 智能异常裁剪诊断（过滤用户正常拖动、回退、切换视频等行为）
         trackBufferHealth: (bufferedAhead, currentTime, currentVideoSrc, isSeeking) => {
             try {
-                if (CoreManager._lastVideoSrc && CoreManager._lastVideoSrc !== currentVideoSrc) {
+                if (currentVideoSrc && CoreManager._lastVideoSrc && CoreManager._lastVideoSrc !== currentVideoSrc) {
                     CoreManager._hiResLogged = false;
                     CoreManager._lastAppliedTarget = null;
-                    if (currentVideoSrc) {
+                    const alreadyReset = (ChunkTracker._resetCount !== CoreManager._lastSyncedResetCount) || ChunkTracker._pendingMediaSourceReset;
+                    ChunkTracker._pendingMediaSourceReset = false;
+                    if (!alreadyReset) {
+                        if (ChunkTracker._activeMediaSource) {
+                            ChunkTracker._activeMediaSource.__detached = true;
+                            ChunkTracker._activeMediaSource = null;
+                        }
                         ChunkTracker.reset();
                     }
                 }
-                if (CoreManager._lastVideoSrc === currentVideoSrc && !isSeeking) {
+                if (currentVideoSrc && CoreManager._lastVideoSrc === currentVideoSrc && !isSeeking) {
                     const timeDelta = currentTime - CoreManager._lastCurrentTime;
                     if (timeDelta >= -0.5 && timeDelta <= 3) {
                         if (CoreManager._lastBufferedTime > 15 && bufferedAhead < CoreManager._lastBufferedTime - 8) {
@@ -1000,7 +1122,11 @@
 
                 CoreManager._lastBufferedTime = bufferedAhead;
                 CoreManager._lastCurrentTime = currentTime;
-                CoreManager._lastVideoSrc = currentVideoSrc;
+                if (currentVideoSrc) {
+                    CoreManager._lastVideoSrc = currentVideoSrc;
+                    CoreManager._lastSyncedResetCount = ChunkTracker._resetCount;
+                    ChunkTracker._pendingMediaSourceReset = false;
+                }
             } catch {}
         },
 
@@ -1405,14 +1531,15 @@
         },
 
         update: () => {
-            const stats = CoreManager.getStats();
-            if (!stats) return;
-
             const video = document.querySelector('video');
+            const bufferedAhead = CoreManager.getBufferedAhead(video);
             const currentTime = video && Number.isFinite(video.currentTime) ? video.currentTime : 0;
             const currentVideoSrc = video ? (video.currentSrc || video.src || '') : '';
             const isSeeking = video ? Boolean(video.seeking) : false;
-            CoreManager.trackBufferHealth(stats.time.current, currentTime, currentVideoSrc, isSeeking);
+            CoreManager.trackBufferHealth(bufferedAhead, currentTime, currentVideoSrc, isSeeking);
+
+            const stats = CoreManager.getStats();
+            if (!stats) return;
 
             UIManager.updateStatsPanel(stats);
             UIManager.updateControlBarBadge(stats);
@@ -1430,14 +1557,31 @@
     const bindVideoEvents = () => {
         const video = document.querySelector('video');
         if (!video || video === lastVideoElement) return;
+        const hadPrevVideo = lastVideoElement !== null;
         lastVideoElement = video;
         CoreManager._lastAppliedTarget = null;
         CoreManager._hiResLogged = false;
+        if (hadPrevVideo) {
+            const currentVideoSrc = video.currentSrc || video.src || '';
+            if (currentVideoSrc) {
+                const bufferedAhead = CoreManager.getBufferedAhead(video);
+                const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+                CoreManager.trackBufferHealth(bufferedAhead, currentTime, currentVideoSrc, Boolean(video.seeking));
+            }
+        }
 
         const onTrigger = () => {
             CoreManager._hiResLogged = false;
             CoreManager._lastAppliedTarget = null;
             setTimeout(() => {
+                const v = document.querySelector('video') || video;
+                if (v) {
+                    const bufferedAhead = CoreManager.getBufferedAhead(v);
+                    const currentTime = Number.isFinite(v.currentTime) ? v.currentTime : 0;
+                    const currentVideoSrc = v.currentSrc || v.src || '';
+                    const isSeeking = Boolean(v.seeking);
+                    CoreManager.trackBufferHealth(bufferedAhead, currentTime, currentVideoSrc, isSeeking);
+                }
                 CoreManager.applyOptimization();
                 UIManager.update();
             }, 300);

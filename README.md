@@ -2,7 +2,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
-[![Version](https://img.shields.io/badge/Release-v3.3-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Version](https://img.shields.io/badge/Release-v3.4-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#安装指南--installation)
 
@@ -31,7 +31,7 @@
 - [核心特性 / Features](#核心特性--features)
 - [技术原理深度解析 / Technical Deep-Dive](#技术原理深度解析--technical-deep-dive)
   - [1. 为什么不能无脑调大内存？“161 MB” 崩溃陷阱解析](#1-为什么不能无脑调大内存161-mb-崩溃陷阱解析)
-  - [2. 黄金法则：为什么默认预设 120 MB？](#2-黄金法则为什么默认预设-120-mb)
+  - [2. 黄金法则：为什么默认预设 135 MB？](#2-黄金法则为什么默认预设-135-mb)
   - [3. v3.2 架构升级：音视频双配额隔离安全模型 (Dual-Quota Safety Budget)](#3-v32-架构升级音视频双配额隔离安全模型-dual-quota-safety-budget)
   - [4. v3.3 架构突破：实时分片追踪引擎与闭环物理内存调控 (Real-Time Chunk Tracking & Closed-Loop Budgeting)](#4-v33-架构突破实时分片追踪引擎与闭环物理内存调控-real-time-chunk-tracking--closed-loop-budgeting)
   - [5. 全量活跃总账本与回退缓冲动态净空调节 (Total Active Ledger & Dynamic Back-Buffer Regulation)](#5-全量活跃总账本与回退缓冲动态净空调节-total-active-ledger--dynamic-back-buffer-regulation)
@@ -78,7 +78,7 @@
 #### 实测验证版本组合
 经两项目联合实测与深度调用链路检验，以下版本组合经过严格兼容性验证：
 - **Bilibili-thread-ripper**: `v0.9.2.3`
-- **Bilibili-Buffer-Unlocker**: `v3.3`
+- **Bilibili-Buffer-Unlocker**: `v3.4`
 
 **验证协同生效方式**：在视频画面右键单击 → **视频统计信息**，确认第一行 `Player Type` 显示为 **`BTR Native (兼容模式)`**，且控制栏左下角的闪电微标 `⚡` 能平滑突破 45 秒并延伸至数分钟。
 
@@ -103,12 +103,12 @@
 - **闭环自适应流控与动态净空调节 (Closed-Loop Headroom Regulation)**：
   - 码率浪涌自适应对齐：$\text{effectiveVideoBps} = \max(\text{manifestVideoBps},\; \text{rollingVideoBps})$，实时捕获 3D 游戏（如 [`BV1oZeA6fERD`](https://www.bilibili.com/video/BV1oZeA6fERD/)）、特效爆炸等极端 VBR 峰值；
   - **基于回退缓冲的动态净空调控**：$\text{remainingHeadroom} = \max(0, \text{SAFE\_LIMIT} - \text{totalBytes})$。当回退缓冲积压时自适应压缩前向配额；当 B 站内核清理回退缓冲时，前向配额自动扩容至满载安全水位；
-  - **安全配额提升**：视频安全上限安全推升至 **125 MiB**（Chromium 硬限制 150 MiB，保留 25 MiB 冗余），音频上限提升至 **9.5 MiB**（硬限制 12 MiB），综合安全上限 **135 MiB**；
-  - 音视频双轨 90% 物理内存防爆熔断：分别监控视频（112.5 MiB）与音频（8.55 MiB）实测物理载荷，任一轨道逼近 90% 即自适应熔断收窄缓冲目标至当前缓冲量，停止新分片请求，彻底杜绝突破 Chromium 150 MiB 视频与 12 MiB 音频阈值引发的 GC 驱逐与重缓冲崩溃；
-  - 采样抗抖与平滑降级：滑动窗口设置 1.0s 最小有效采样门槛，滤除单关键帧产生的瞬时虚高噪点；冷启动未收集到分片时无缝回退至静态清单双配额模型；首屏分片安全持久化，仅在切集换源时触发物理账本重置。
-- **双配额动态安全内存上限（智能限流）**：
+  - **安全配额提升与三轨协同闭环**：视频安全上限推升至 **125 MiB**（Chromium 硬限制 150 MiB，保留 25 MiB 冗余），音频上限提升至 **9.5 MiB**（硬限制 12 MiB），综合安全上限 **135 MiB**（`SAFE_BYTE_LIMIT` 同步参与冷启动安全秒数预算与闭环总活跃内存净空调控）；
+  - 音视频及总内存 90%/85% 施密特触发器防爆熔断：分别监控视频（112.5 MiB）、音频（8.55 MiB）与总活跃（121.5 MiB）实测物理载荷，任一维度 $\ge 90\%$ 即锁存熔断收窄缓冲目标至当前缓冲量，回落至 $< 85\%$ 后平滑解锁恢复，彻底杜绝临界点锯齿震荡及突破 Chromium 阈值引发的 GC 驱逐崩溃；
+  - 采样抗抖与平滑降级：滑动窗口设置 1.0s 最小有效采样门槛，滤除单关键帧产生的瞬时虚高噪点；冷启动未收集到分片时无缝回退至静态清单多配额模型；首屏分片安全持久化，仅在切集换源时触发物理账本重置。
+- **多配额动态安全内存上限（智能限流）**：
   - 自动从播放器元数据独立提取音视频码率 (`mediaInfo.videoDataRate` 与 `mediaInfo.audioDataRate`)。
-  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **125 MiB**（硬限制 150 MiB），音频轨安全上限 **9.5 MiB**（硬限制 12 MiB），双轨取交集保底，杜绝单轨内存溢出与 GC 驱逐。
+  - 深度对齐 Chromium MSE 底层规范：视频轨安全上限 **125 MiB**（硬限制 150 MiB），音频轨安全上限 **9.5 MiB**（硬限制 12 MiB），综合安全上限 **135 MiB**，三者取交集保底，杜绝单轨或全局内存溢出与 GC 驱逐。
 - **真·连续缓冲计算（Range-Containment）**：
   - 准确遍历 `HTMLMediaElement.buffered` 的离散区间，智能聚合微小缝隙（$\le 0.25\text{ s}$）的连续分片，精准匹配当前进度点。
   - 彻底解决用户回拖进度条（Seek）或分段拉流时缓冲区虚标与假死问题。
@@ -169,15 +169,15 @@ inline constexpr base::ByteSize kDemuxerStreamVideoMemoryLimitDefault = base::Mi
 7. 脚本检测到缓冲降为 0，再次指令拉取缓冲……进入死循环，疯狂消耗带宽并导致播放卡死
 ```
 
-### 2. 黄金法则：为什么默认预设 120 MB？
+### 2. 黄金法则：为什么默认预设 135 MB？
 
 $$
-\text{162 MB (Chromium 硬限制)} - \text{120 MB (预设基准)} = 42\text{ MB (安全余量)}
+\text{162 MB (Chromium 硬限制)} - \text{135 MB (v3.3 预设基准)} = 27\text{ MB (物理安全余量)}
 $$
 
 1. **GOP / 关键帧脉冲**：4K 视频一个 GOP 切片往往达 15~25 MB。若将上限设在 150 MB，下一个切片追加瞬间便会冲破 162 MB 触发 GC 崩溃。
 2. **VBR（动态码率）突发**：高动态场景（演唱会、特效大片）瞬间码率可能飙升至均值的 2 倍以上。
-3. **结论**：**`120 MB ~ 130 MB` 是兼顾超长缓冲与绝对稳定性的最佳平衡点**。
+3. **从 120 MB 到 135 MB 的精准演进**：早期版本（v3.0 ~ v3.2）因未追踪历史回退分片，需将上限压低至 `118 ~ 120 MB`（预留 42~44 MB 宽余量以盲防回退积压）；v3.3 引入全量活跃总账本与回退动态净空调控后，回退与前向内存统一纳入实时监控，因此默认上限安全推升至 **`135 MB`（视频 125 MiB + 音频 9.5 MiB）**，是兼顾超长缓冲与绝对稳定性的最佳平衡点。
 
 ### 3. v3.2 架构升级：音视频双配额隔离安全模型 (Dual-Quota Safety Budget)
 
@@ -240,16 +240,16 @@ $$
 $$
 
    - 自适应捕获浪涌：$\text{effectiveVideoBps} = \max(\text{manifestVideoBps},\; \text{rollingVideoBps})$。当高复杂度场景爆发时，安全时长即刻动态收缩。
-3. **音视频双轨 90% 闭环物理内存防爆熔断**：
-   - 实时监控视频（125 MiB）与音频（9.5 MiB）实测物理载荷，当总活跃或前向物理内存逼近安全线（$\ge 90\%$，即视频 112.5 MiB / 音频 8.55 MiB）时，目标缓冲秒数自动熔断封顶至当前已缓冲量：
+3. **音视频及总内存 90%/85% 施密特触发器闭环物理内存防爆熔断**：
+   - 实时监控视频（125 MiB）、音频（9.5 MiB）与总活跃（135 MiB）实测物理载荷，当任一维度总活跃或前向物理内存逼近安全线（$\ge 90\%$，即视频 112.5 MiB / 音频 8.55 MiB / 综合 121.5 MiB）时，施密特触发器进入锁存（Latch）状态，目标缓冲秒数自动熔断封顶至当前已缓冲量：
 
 $$
 \text{safeSeconds} = \min\left(\text{safeSeconds},\; \max(20,\; \lfloor\text{currentBuffered}\rfloor)\right)
 $$
 
-   - 强制播放器停止拉取新分片，给 Chromium 预留充足的绝对安全余量，直至播放推进、内存释放后才继续预载，从物理层面彻底根除单轨超限引发的 GC 缓存重设。
-4. **高精差分与首屏分片安全机制**：
-   - 支持双向边界扩展匹配，杜绝清晰度切换或跨度关键帧替换导致分片漏统；
+   - 强制播放器停止拉取新分片，给 Chromium 预留充足的绝对安全余量；仅当饱和度回落至释放阈值（$< 85\%$）以下时才解除锁存恢复预载，既彻底消除 90% 临界点附近的锯齿形震荡，又从物理层面根除单轨或全局超限引发的 GC 缓存重设。
+4. **多区间差集与首屏分片安全机制**：
+   - `diffRanges` 实现完整的精确区间差集算法，支持单次 `appendBuffer` 填补多处跳播空洞或同时扩展左右边界时按时长比例切分字节，杜绝跨空洞合并时将已有区间重复计入新分片；
    - 区分初始挂载与真实换源，首屏捕获分片安全持久化；
    - 统一提取器容错 DASH 流首帧 0.5s 呈现偏移，全场景精准捕捉前向有效缓冲。
 
@@ -271,13 +271,15 @@ $$
 \text{totalVideoBytes} = \sum_{\text{videoLedger}} \text{chunkBytes} = \text{pastVideoBytes} + \text{forwardVideoBytes} + \text{unevictedChunks}
 $$
 
-   对每一分片精确按时序切分为回退段 $[\text{start}, \min(\text{end}, t_{\text{current}})]$ 与前向段 $[\max(\text{start}, t_{\text{current}}), \text{end}]$，实时计算全局真实占用。
-2. **基于总活跃内存的动态净空公式**：
+   对每一分片精确按时序切分为回退段 $[\text{start}, \min(\text{end}, t_{\text{current}})]$ 与前向有效连续段 $[\max(\text{start}, t_{\text{current}}), \min(\text{end}, t_{\text{forwardEnd}})]$，实时计算各区段与全局真实占用。
+2. **基于总活跃内存的三维动态净空公式**：
 
 $$
 \begin{aligned}
 \text{remainingVideoHeadroom} &= \max\left(0, \text{SAFE\_VIDEO\_BYTE\_LIMIT} - \text{totalVideoBytes}\right) \\
-\text{allowedForwardDuration} &= \text{currentBuffered} + \frac{\text{remainingVideoHeadroom}}{\text{effectiveVideoBps}}
+\text{remainingAudioHeadroom} &= \max\left(0, \text{SAFE\_AUDIO\_BYTE\_LIMIT} - \text{totalAudioBytes}\right) \\
+\text{remainingTotalHeadroom} &= \max\left(0, \text{SAFE\_BYTE\_LIMIT} - (\text{totalVideoBytes} + \text{totalAudioBytes})\right) \\
+\text{allowedForwardDuration} &= \text{currentBuffered} + \min\left(\frac{\text{remainingVideoHeadroom}}{\text{effectiveVideoBps}},\; \frac{\text{remainingAudioHeadroom}}{\text{effectiveAudioBps}},\; \frac{\text{remainingTotalHeadroom}}{\text{effectiveTotalBps}}\right)
 \end{aligned}
 $$
 
@@ -297,7 +299,7 @@ $$
 const CONFIG = {
     MIN_TIME_LIMIT: 20,                 // 最低缓冲时间下限 (秒)
     MAX_TIME_LIMIT: 600,                // 缓冲时间上限 600秒 (10分钟)
-    SAFE_BYTE_LIMIT: 135 * 1024 * 1024, // 综合安全内存空间上限 135MB (展示基准)
+    SAFE_BYTE_LIMIT: 135 * 1024 * 1024, // 综合安全内存空间上限 135 MiB (参与总活跃内存闭环调控与展示基准)
     SAFE_VIDEO_BYTE_LIMIT: 125 * 1024 * 1024, // 视频安全内存上限 125 MiB (Chromium硬限制 150 MiB，保留 25 MiB 冗余缓冲区)
     SAFE_AUDIO_BYTE_LIMIT: Math.round(9.5 * 1024 * 1024), // 音频安全内存上限 9.5 MiB (Chromium硬限制 12 MiB，保留 2.5 MiB 冗余缓冲区)
     CHECK_INTERVAL: 3000,               // 内核优化轮询间隔 (毫秒)
@@ -326,20 +328,40 @@ const CONFIG = {
 
 ### 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
 
+#### v3.4 (2026-10) - *鲁棒性深度加固：多区间差集引擎、MediaSource 生命周期隔离与施密特防抖熔断*
+- **多区间精确差集与双向扩展字节分摊 (`diffRanges` & `onUpdateEnd`)**：
+  - 重构 `ChunkTracker.diffRanges` 为完整的多段差集算法（`segments` + `uncoveredDuration`），单次 `appendBuffer` 跨空洞合并或双向扩展时仅提取真正新增的未覆盖子区间并按时长比例分摊 `byteLength`；
+  - 彻底修复跨区间桥接丢弃内部缝隙以及双向扩展误裁已有长缓冲区间的问题。
+- **`MediaSource` 生命周期追踪与换源单次重置同步**：
+  - 追踪活跃 `MediaSource` 实例（`_activeMediaSource`）与账本代数（`_generation` / `_resetCount` / `_pendingMediaSourceReset`），拦截 `MediaSource.prototype.removeSourceBuffer` 标记已卸载 `SourceBuffer`（`__detached = true`），过滤卸载缓冲区延迟触发的 `updateend` 与 `remove` 事件；
+  - 协同同步 `addSourceBuffer` 与 `CoreManager.trackBufferHealth`，确保切集或切换清晰度时无论 `MediaSource` 重建与 `video.currentSrc` 变更先后顺序如何，物理账本严格仅重置一次，杜绝双重置误清首屏分片；
+  - 忽略换源过渡期的瞬态空地址（`currentVideoSrc === ''`），并统一 `UIManager.update` 与 `bindVideoEvents` 中 `trackBufferHealth` 先于 `applyOptimization` / `getStats` 的执行顺序。
+- **90% / 85% 施密特触发器防爆熔断 (Schmitt-Trigger Hysteresis)**：
+  - 为视频、音频及总活跃内存引入独立的施密特触发器锁存状态（`_videoThrottled`、`_audioThrottled`、`_totalThrottled`）：物理载荷达到 $\ge 90\%$ 时锁存熔断并收窄缓冲目标至当前已缓冲量，仅当内存回落至 $< 85\%$ 时才释放锁存，彻底消除 90% 临界点附近的锯齿形反复震荡。
+- **`SourceBuffer.prototype.remove` 异常安全守卫**：
+  - 调整 `SBProto.remove` 钩子顺序为先执行原生 `origRemove.apply(this, arguments)`，确认原生调用未抛出异常后再执行 `ChunkTracker.onRemove` 修剪账本，杜绝同步异常导致的账本失步。
+- **冷启动 `SAFE_BYTE_LIMIT` 约束与死区 / Hi-Res 边界修复**：
+  - 冷启动（`totalActiveBytes === 0`）阶段将 `SAFE_BYTE_LIMIT / effectiveTotalBps` 纳入初始安全秒数交集预算；
+  - 修复 `applyOptimization` 在 `30s` 边界处的防抖死区绕过缺陷，支持播放器外部重置 `20s` 时的即时恢复；
+  - 修复 Hi-Res / 杜比全景声免干预分支恒真判定，当脚本从未介入扩容时完整保留播放器原生低缓冲设置（$\le 30\text{ s}$）。
+- **自动化测试与跨平台真机浏览器 CDP 验证升级**：
+  - 单元测试套件（`test_unit.js`）扩展至 30 项全量与边界回归测试，补齐原生 `appendBuffer` / `remove` 同步异常与零字节分片测试，清理后台定时器句柄；
+  - 升级 `test_cdp.js` 支持 macOS / Linux / Windows 及 `CHROME_BIN` 跨平台 Chromium 自动探测，新增本地真实 MSE 二进制分片流与 B 站线上环境的端到端 CDP 自动化验证。
+
 #### v3.3 (2026-09) - *里程碑升级：MSE 分片实时物理追踪、全量活跃总账本与闭环防爆架构*
 - **全量活跃物理分片追踪引擎 (`ChunkTracker`)**：
   - 底层拦截 `MediaSource.prototype.addSourceBuffer`，精准标记音视频分片轨属（`video` / `audio`）；
-  - 拦截 `SourceBuffer.prototype.appendBuffer`，监听 `updateend` 并使用时序差分算法提取分片物理大小（`data.byteLength`）与时序区间 $[\text{start}, \text{end}]$，记录物理分片账本；
+  - 拦截 `SourceBuffer.prototype.appendBuffer`，监听 `updateend` 并使用多区间精确差集算法（`diffRanges`）提取分片物理大小（`data.byteLength`）与时序区间 $[\text{start}, \text{end}]$，支持多段差集按时长比例分摊字节并记录物理分片账本；
   - 拦截 `SourceBuffer.prototype.remove`，实现用户快进或内核历史裁剪时的精确物理区间修剪；
   - **实现全量活跃账本透视**：同时提供前向连续缓冲（`forward`）、回退未清理内存（`past`）与 MSE 全局物理账本（`totalActive`），提供完整属性与 getter 接口；
   - 建立滑动窗口移动平均码率计算（Rolling Bitrate），秒级感知场景动态复杂度。
 - **回退动态净空流控与安全限额提升 (Dynamic Back-Buffer Headroom Regulation)**：
-  - **动态净空呼吸流控**：$\text{remainingHeadroom} = \max(0, \text{SAFE\_LIMIT} - \text{totalBytes})$。当回退历史缓冲较多时前向可用净空自适应收敛；当 B 站后台清理器通过 `remove()` 释放回退分片时，前向配额秒级自动扩容释放；
+  - **动态净空呼吸流控**：$\text{remainingHeadroom} = \max(0, \text{SAFE\_LIMIT} - \text{totalBytes})$。视频（125 MiB）、音频（9.5 MiB）与综合总活跃内存（`SAFE_BYTE_LIMIT` 135 MiB）三维协同参与净空调控；当回退历史缓冲较多时前向可用净空自适应收敛，当 B 站后台清理器通过 `remove()` 释放回退分片时，前向配额秒级自动扩容释放；
   - **安全限额稳步调优**：根除回退盲区后，视频安全上限安全提升至 **125 MiB**（对 Chromium 150 MiB 硬顶保留 25 MiB 冗余），音频上限提升至 **9.5 MiB**（对 12 MiB 硬顶保留 2.5 MiB 冗余），综合基准提升至 **135 MiB**；
   - 引入 $\text{effectiveVideoBps} = \max(\text{manifestVideoBps},\; \text{rollingVideoBps})$ 动态码率自适应，针对高动态 3D 游戏（如 [`BV1oZeA6fERD`](https://www.bilibili.com/video/BV1oZeA6fERD/)）瞬间压缩目标时长，杜绝物理过载；
-  - 引入音视频双轨 90% 前向与全局物理内存安全熔断（视频 112.5 MiB / 音频 8.55 MiB），任一单轨逼近上限时自适应封顶前向缓冲，从根本上杜绝 Chromium 150 MiB 视频与 12 MiB 音频内存 GC 驱逐与重缓冲崩溃；
+  - 引入音视频及总内存 90%/85% 施密特触发器安全熔断（视频 112.5 MiB / 音频 8.55 MiB / 综合 121.5 MiB），任一维度 $\ge 90\%$ 时锁存封顶前向缓冲，回落至 $< 85\%$ 解锁恢复，彻底消除临界点锯齿震荡及 Chromium MSE GC 驱逐崩溃；
   - 亚秒级抖动抑制：滑动窗口设置 1.0s 最小采样时长门槛，消除单关键帧（I 帧）瞬时虚高噪点；
-  - 冷启动与换源兼容：修复首屏启动分片持久化，仅切集换源重置账本；未收集分片时全自动平滑降级至清单双配额模型。
+  - 冷启动与换源兼容：修复首屏启动分片持久化，仅切集换源重置账本；未收集分片时全自动平滑降级至清单多配额模型。
 - **执行生命周期提前至 `@run-at document-start`**：
   - 在播放器 DASH 内核加载前即注入底层 MSE 原型钩子，确保从第 1 个分片起 100% 完整捕获；
   - DOM 依赖组件（UI、事件监听）自适应延迟至 `DOMContentLoaded` 唤醒。
@@ -354,7 +376,7 @@ const CONFIG = {
 
 #### v3.2 (2026-09)
 - **双配额独立内存安全预算 (Dual-Quota Memory Budget)**：
-  - 将缓冲时长安全计算解耦为独立的视频轨与音频轨配额预算（视频 110 MiB 安全线 / 音频 10 MiB 安全线），双轨各自按码率计算可缓冲秒数并取下限交集，彻底消除高规格音频或超高码率单轨突破 Chromium MSE 阈值引发的 GC 驱逐风险；
+  - 将缓冲时长安全计算解耦为独立的视频轨与音频轨配额预算（视频 110 MiB 安全线 / 音频 8 MiB 安全线），双轨各自按码率计算可缓冲秒数并取下限交集，彻底消除高规格音频或超高码率单轨突破 Chromium MSE 阈值引发的 GC 驱逐风险；
   - 增加单轨码率缺失自适应补全：当仅音频或仅视频码率已知但流总带宽有效时，智能差分推导另一轨码率，杜绝因单轨缺省引发的时长虚高与内存击穿。
 - **Hi-Res / 杜比全景声全面识别与主动安全重置**：
   - 扩展特殊流识别范围，覆盖 `ac-3`、`ac3`、`ac-4` 及 B 站音频质量 ID `30250`（杜比全景声）和 `30251`（Hi-Res 无损），同时支持对 `audioQualityName` 字符串的文本特征深度识别；
@@ -410,14 +432,14 @@ const CONFIG = {
 
 ## 安装指南 / Installation
 
-### 途径一：本仓库持续维护版（v3.3+ 推荐）
+### 途径一：本仓库持续维护版（v3.4+ 推荐）
 
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
 2. 点击下方链接一键安装最新重构版：
-   - **[安装 v3.3+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - **[安装 v3.4+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
    - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
 
 ### 途径二：Greasy Fork 原版（v2.2 基础归档）

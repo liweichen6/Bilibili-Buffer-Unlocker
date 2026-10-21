@@ -1,10 +1,10 @@
-// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.3
+// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.4
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-console.log('--- Running Automated Unit Tests for v3.3 ---');
+console.log('--- Running Automated Unit Tests for v3.4 ---');
 
 // Setup mock browser environment
 class MockTimeRanges {
@@ -49,12 +49,18 @@ class MockSourceBuffer extends MockEventTarget {
         this.buffered = new MockTimeRanges([]);
         this.updating = false;
         this.__appendedData = [];
+        this._throwOnNextAppend = false;
+        this._throwOnNextRemove = false;
     }
     appendBuffer(data) {
+        if (this._throwOnNextAppend) {
+            this._throwOnNextAppend = false;
+            throw new Error('QuotaExceededError');
+        }
         this.updating = true;
         this.__appendedData.push(data);
         // Simulate async decoding and buffer range update before updateend
-        setTimeout(() => {
+        this._lastTimer = setTimeout(() => {
             if (typeof this._onNextUpdate === 'function') {
                 this._onNextUpdate();
                 this._onNextUpdate = null;
@@ -64,6 +70,10 @@ class MockSourceBuffer extends MockEventTarget {
         }, 5);
     }
     remove(start, end) {
+        if (this._throwOnNextRemove) {
+            this._throwOnNextRemove = false;
+            throw new Error('InvalidAccessError');
+        }
         this.updating = true;
         setTimeout(() => {
             this.updating = false;
@@ -82,6 +92,9 @@ class MockMediaSource extends MockEventTarget {
         sb.__mime = mimeType;
         this.sourceBuffers.push(sb);
         return sb;
+    }
+    removeSourceBuffer(sb) {
+        this.sourceBuffers = this.sourceBuffers.filter(s => s !== sb);
     }
 }
 
@@ -202,12 +215,22 @@ const mockCtrlBottomLeft = {
     querySelectorAll: (sel) => sel.includes('bili-buffer-badge') ? mockCtrlBadges : []
 };
 
+const activeTimers = [];
+const trackTimer = (fn, ms) => {
+    const handle = setTimeout(fn, ms);
+    if (handle && typeof handle.unref === 'function') handle.unref();
+    activeTimers.push(handle);
+    return handle;
+};
+
 const mockWindow = {
     MediaSource: MockMediaSource,
     SourceBuffer: MockSourceBuffer,
     document: mockDocument,
-    setInterval: (fn) => setTimeout(fn, 100000),
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    setInterval: (fn) => trackTimer(fn, 100000),
+    setTimeout: (fn, ms) => trackTimer(fn, Math.max(ms || 0, 100000)),
+    clearInterval: (id) => clearTimeout(id),
+    clearTimeout: (id) => clearTimeout(id),
     console: console,
     player: {
         __core: () => ({
@@ -534,9 +557,13 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     CoreManager.trackBufferHealth(5, 0, 'blob:https://www.bilibili.com/part1', false);
     assert.strictEqual(ChunkTracker.videoLedger.length, 1, 'Initial update should NOT wipe startup chunks');
 
-    // Switch video source (user clicks Next Video / P2)
+    // Transient empty currentVideoSrc during DOM transition must NOT overwrite _lastVideoSrc
+    CoreManager.trackBufferHealth(0, 0, '', false);
+    assert.strictEqual(CoreManager._lastVideoSrc, 'blob:https://www.bilibili.com/part1', 'Transient empty src must not overwrite _lastVideoSrc');
+
+    // Switch video source (user clicks Next Video / P2) after transient empty src
     CoreManager.trackBufferHealth(0, 0, 'blob:https://www.bilibili.com/part2', false);
-    assert.strictEqual(ChunkTracker.videoLedger.length, 0, 'Switching video source MUST reset ledger');
+    assert.strictEqual(ChunkTracker.videoLedger.length, 0, 'Switching video source MUST reset ledger even after transient empty src');
     console.log('✓ Video source switching vs initial load persistence passed.');
 }
 
@@ -584,13 +611,30 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(dBoth.start, 8, 'Start should expand to 8');
     assert.strictEqual(dBoth.end, 14, 'End should expand to 14');
     assert.strictEqual(dBoth.duration, 6, 'Duration should be 6');
+    assert.strictEqual(dBoth.uncoveredDuration, 4, 'Uncovered duration should be 4s ([8,10] + [12,14])');
+    assert.strictEqual(dBoth.segments.length, 2, 'Bidirectional expansion should return only the 2 uncovered boundary segments');
+
+    // Verify bidirectional expansion on an existing 100 MB range [10, 110] -> [9, 111] (+2 MB) does NOT prune the 100 MB middle
+    ChunkTracker.reset();
+    ChunkTracker.recordChunk('video', 10, 110, 100 * 1024 * 1024);
+    const dLong = ChunkTracker.diffRanges([{ start: 10, end: 110 }], [{ start: 9, end: 111 }]);
+    let remBytes = 2 * 1024 * 1024;
+    for (let k = 0; k < dLong.segments.length; k++) {
+        const s = dLong.segments[k];
+        const b = (k === dLong.segments.length - 1) ? remBytes : Math.round(2 * 1024 * 1024 * (s.duration / dLong.uncoveredDuration));
+        remBytes -= b;
+        ChunkTracker.recordChunk('video', s.start, s.end, b);
+    }
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 102 * 1024 * 1024, 'Bidirectional boundary expansion must preserve existing 100 MB middle chunk');
     console.log('✓ Bidirectional range expansion passed.');
 }
 
 // Test 14: Safe appendBuffer Hook Error Handling
 {
     console.log('\n[Test 14] Testing appendBuffer exception handling & zero-byte buffer safety...');
+    assert.strictEqual(MockSourceBuffer.prototype.appendBuffer.__hooked, true, 'MockSourceBuffer.prototype.appendBuffer must be hooked by ChunkTracker');
     const sb = new MockSourceBuffer();
+    sb.__trackType = 'video';
     let listenerCount = 0;
     const origAddEventListener = sb.addEventListener.bind(sb);
     sb.addEventListener = (event, fn, opts) => {
@@ -598,18 +642,37 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
         return origAddEventListener(event, fn, opts);
     };
 
-    // Make appendBuffer throw synchronously
-    const origAppend = MockSourceBuffer.prototype.appendBuffer;
-    MockSourceBuffer.prototype.appendBuffer = function() {
-        throw new Error('QuotaExceededError');
-    };
-
+    // Make underlying native appendBuffer throw synchronously while keeping ChunkTracker's wrapper intact
+    sb._throwOnNextAppend = true;
+    let caughtErr = null;
     try {
         sb.appendBuffer(new Uint8Array(1024));
-    } catch {}
+    } catch (err) {
+        caughtErr = err;
+    }
 
+    assert(caughtErr && caughtErr.message === 'QuotaExceededError', 'Underlying QuotaExceededError should propagate');
     assert.strictEqual(listenerCount, 0, 'Synchronous appendBuffer error must NOT register updateend listener');
-    MockSourceBuffer.prototype.appendBuffer = origAppend;
+
+    // Test zero-byte buffer safety through hooked appendBuffer and verify updateend does not record a 0-byte chunk
+    ChunkTracker.reset();
+    sb._onNextUpdate = () => {
+        sb.buffered._setRanges([[0, 5]]);
+    };
+    sb.appendBuffer(new Uint8Array(0));
+    assert.strictEqual(listenerCount, 1, 'Successful appendBuffer should register once listener');
+    if (sb._lastTimer) {
+        clearTimeout(sb._lastTimer);
+        sb._lastTimer = null;
+    }
+    if (typeof sb._onNextUpdate === 'function') {
+        sb._onNextUpdate();
+        sb._onNextUpdate = null;
+    }
+    sb.updating = false;
+    sb.dispatchEvent('updateend');
+    assert.strictEqual(ChunkTracker.videoLedger.length, 0, 'Zero-byte appendBuffer must not record a 0-byte chunk in videoLedger');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Total video bytes must remain 0 after zero-byte appendBuffer');
     console.log('✓ Safe appendBuffer error handling passed.');
 }
 
@@ -913,6 +976,7 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(Utils.formatSize(undefined), '0 MB');
     assert.strictEqual(Utils.formatSize(null), '0 MB');
 
+    mockVideo.duration = 300;
     console.log('✓ UIManager and getStats Multi-Line Stats Panel Integration & Color Logic passed.');
 }
 
@@ -1077,6 +1141,329 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     console.log('✓ UIManager.updateControlBarBadge Lifecycle, Simplified Tooltip & Text Color Logic passed.');
 }
 
+// Test 23: Multi-MediaSource Isolation & Detached SourceBuffer Protection (Issue 1.1)
+{
+    console.log('\n[Test 23] Testing Multi-MediaSource Isolation & Detached SourceBuffer Protection (Issue 1.1)...');
+    ChunkTracker.reset();
+
+    const ms1 = new MockMediaSource();
+    const vSb1 = ms1.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    const aSb1 = ms1.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+
+    assert.strictEqual(ChunkTracker._activeMediaSource, ms1, 'ms1 should be active MediaSource');
+    assert.strictEqual(vSb1.__detached, false);
+    assert.strictEqual(aSb1.__detached, false);
+
+    ChunkTracker.recordChunk('video', 0, 30, 15 * 1024 * 1024);
+    ChunkTracker.recordChunk('audio', 0, 30, 1 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * 1024 * 1024);
+
+    // Detach aSb1 via removeSourceBuffer; subsequent remove() on aSb1 must NOT prune active audio ledger
+    ms1.removeSourceBuffer(aSb1);
+    assert.strictEqual(aSb1.__detached, true, 'Removed SourceBuffer must be marked __detached');
+    aSb1.remove(0, 30);
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 1 * 1024 * 1024, 'Detached SourceBuffer.remove() must not prune active audio ledger');
+
+    // Creating a new MediaSource and adding a SourceBuffer detaches ms1 and resets the ledger for the new stream
+    const ms2 = new MockMediaSource();
+    const vSb2 = ms2.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    assert.strictEqual(ms1.__detached, true, 'Old MediaSource ms1 should be marked __detached');
+    assert.strictEqual(ChunkTracker._activeMediaSource, ms2, 'ms2 should now be active MediaSource');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Switching active MediaSource should reset video ledger');
+
+    // Record chunk on new MediaSource ms2, then verify stale vSb1.remove() from ms1 is ignored
+    ChunkTracker.recordChunk('video', 0, 20, 10 * 1024 * 1024);
+    vSb1.remove(0, 20);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024, 'Stale SourceBuffer from detached MediaSource must not affect new ledger');
+
+    console.log('✓ Multi-MediaSource Isolation & Detached SourceBuffer Protection passed.');
+}
+
+// Test 24: Multi-Segment Range Diffing & In-Place Overwrite Dedup (Issue 1.2)
+{
+    console.log('\n[Test 24] Testing Multi-Segment Range Diffing & In-Place Overwrite Dedup (Issue 1.2)...');
+    ChunkTracker.reset();
+
+    // Bridging a gap between two existing ranges [0, 10] and [15, 25] with right expansion to [0, 30]
+    // Uncovered new segments are [10, 15] (5s) and [25, 30] (5s) -> uncoveredDuration = 10s (NOT 30s!)
+    const diffBridge = ChunkTracker.diffRanges(
+        [{ start: 0, end: 10 }, { start: 15, end: 25 }],
+        [{ start: 0, end: 30 }]
+    );
+    assert(diffBridge !== null, 'Bridge diff should not be null');
+    assert.strictEqual(diffBridge.segments.length, 2, 'Should identify 2 uncovered segments ([10,15] and [25,30])');
+    assert(Math.abs(diffBridge.uncoveredDuration - 10) < 0.01, `Uncovered duration should be 10s, got ${diffBridge.uncoveredDuration}`);
+
+    // Overwrite [10, 20] in-place with a 20 MB high-bitrate segment (e.g. quality switch)
+    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 10, 20, 10 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 10, 20, 20 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.videoLedger.length, 2, 'Overwritten segment should replace old [10, 20] entry');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 30 * 1024 * 1024, 'Total video bytes should be 10MB + 20MB = 30MB');
+
+    // Partial overlap overwrite: append [5, 15] (12 MB) overlapping half of [0, 10] (5 MB left) and half of [10, 20] (10 MB left)
+    ChunkTracker.recordChunk('video', 5, 15, 12 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.videoLedger.length, 3, 'Should split into [0,5], [5,15], and [15,20]');
+    assert(Math.abs(ChunkTracker.totalVideoBytes - 27 * 1024 * 1024) < 10, `Expected 27 MB after partial overlap, got ${ChunkTracker.totalVideoBytes}`);
+
+    console.log('✓ Multi-Segment Range Diffing & In-Place Overwrite Dedup passed.');
+}
+
+// Test 25: Exception-Safe remove() & appendBuffer() Hooks (Issue 1.3)
+{
+    console.log('\n[Test 25] Testing Exception-Safe remove() & appendBuffer() Hooks (Issue 1.3)...');
+    ChunkTracker.reset();
+
+    const ms = new MockMediaSource();
+    const vSb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    ChunkTracker.recordChunk('video', 0, 30, 30 * 1024 * 1024);
+
+    // Simulate native remove() throwing InvalidAccessError: ledger must NOT be pruned
+    vSb._throwOnNextRemove = true;
+    let removeThrew = false;
+    try {
+        vSb.remove(0, 30);
+    } catch (e) {
+        removeThrew = true;
+    }
+    assert.strictEqual(removeThrew, true, 'Hooked remove() should rethrow native error');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 30 * 1024 * 1024, 'Failed native remove() must not prune ledger');
+
+    // Valid remove() should prune ledger
+    vSb.remove(0, 10);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 20 * 1024 * 1024, 'Successful native remove(0, 10) should prune 10 MB');
+
+    console.log('✓ Exception-Safe remove() & appendBuffer() Hooks passed.');
+}
+
+// Test 26: Rolling Window Byte-Rate Stability & Sequence Ordering (Issue 1.4)
+{
+    console.log('\n[Test 26] Testing Rolling Window Byte-Rate Stability & Sequence Ordering (Issue 1.4)...');
+    ChunkTracker.reset();
+
+    // Append 5 segments of 4s each at 2 MB/s (8 MB per 4s segment) -> 20s total, 40 MB total
+    for (let i = 0; i < 5; i++) {
+        ChunkTracker.recordChunk('video', i * 4, (i + 1) * 4, 8 * 1024 * 1024);
+    }
+    // Now append one tiny 0.6s sub-segment of only 60 KB (100 KB/s)
+    ChunkTracker.recordChunk('video', 20, 20.6, 60 * 1024);
+
+    // Rolling window (~20.6s) keeps rate near 2 MB/s instead of collapsing to the last chunk
+    const rollingRate = ChunkTracker.getRollingBitrate('video');
+    const expectedRollingRate = (40 * 1024 * 1024 + 60 * 1024) / 20.6;
+    assert(Math.abs(rollingRate - expectedRollingRate) < 100, `Expected rolling rate ~${Math.round(expectedRollingRate)}, got ${rollingRate}`);
+    assert(rollingRate > 1.9 * 1024 * 1024, 'Rolling byte rate should remain > 1.9 MB/s despite tiny trailing chunk');
+
+    console.log('✓ Rolling Window Byte-Rate Stability & Sequence Ordering passed.');
+}
+
+// Test 27: Schmitt-Trigger Hysteresis Anti-Oscillation Near 90% Threshold (Issue 1.5)
+{
+    console.log('\n[Test 27] Testing Schmitt-Trigger Hysteresis Anti-Oscillation Near 90% Threshold (Issue 1.5)...');
+    ChunkTracker.reset();
+
+    mockVideo.currentTime = 20;
+    mockVideo.buffered._setRanges([[20, 50]]); // 30s forward buffer
+
+    // Push video to 91% of 125 MB (113.75 MB) -> triggers 90% redline latch
+    ChunkTracker.recordChunk('video', 0, 20, 83.75 * 1024 * 1024);
+    ChunkTracker.recordChunk('video', 20, 50, 30 * 1024 * 1024);
+    assert.strictEqual(CoreManager.calculateSafeDuration(), 30, 'At 91% video usage, safeDuration must clamp to currentBuffered (30s)');
+    assert.strictEqual(CoreManager._videoThrottled, true, '_videoThrottled latch should be active');
+
+    // Evict ~2.5 MB from past buffer -> total video drops to ~111.25 MB (89% of 125 MB)
+    // With Schmitt-trigger hysteresis (release at < 85% = 106.25 MB), latch stays engaged at 89%!
+    ChunkTracker.onRemove('video', 0, 0.597);
+    assert(ChunkTracker.totalVideoBytes < CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.90, 'Video is now below 90%');
+    assert(ChunkTracker.totalVideoBytes >= CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.85, 'Video is still above 85% hysteresis release threshold');
+    assert.strictEqual(CoreManager.calculateSafeDuration(), 30, 'Schmitt-trigger latch must keep safeDuration clamped at 30s while between 85% and 90%');
+    assert.strictEqual(CoreManager._videoThrottled, true, '_videoThrottled latch should remain true at 89%');
+
+    // Evict enough past buffer to drop below 85% (< 106.25 MB): remove [0, 10] -> ~71.875 MB (57.5%)
+    ChunkTracker.onRemove('video', 0, 10);
+    assert(ChunkTracker.totalVideoBytes < CONFIG.SAFE_VIDEO_BYTE_LIMIT * 0.85, 'Video is now well below 85% release threshold');
+    const durReleased = CoreManager.calculateSafeDuration();
+    assert.strictEqual(CoreManager._videoThrottled, false, '_videoThrottled latch should release below 85%');
+    assert(durReleased > 30, `Expected safeDuration to expand above 30s once below 85%, got ${durReleased}`);
+
+    console.log('✓ Schmitt-Trigger Hysteresis Anti-Oscillation Near 90% Threshold passed.');
+}
+
+// Test 28: Cold-Start Total Limit Respect & Remaining Time Clamping (Issue 1.6)
+{
+    console.log('\n[Test 28] Testing Cold-Start SAFE_BYTE_LIMIT Respect & Remaining Time Clamping (Issue 1.6)...');
+    ChunkTracker.reset();
+
+    // Subtest 28.1: Cold-start (totalActiveBytes === 0) must respect SAFE_BYTE_LIMIT
+    const origSafeLimit = CONFIG.SAFE_BYTE_LIMIT;
+    CONFIG.SAFE_BYTE_LIMIT = 52 * 1024 * 1024; // 52 MiB total limit
+    mockVideo.currentTime = 0;
+    mockVideo.duration = 600;
+    mockVideo.buffered._setRanges([]);
+
+    // Manifest rate: video 1 MB/s + audio 40 KB/s = 1,040,000 B/s
+    // safeTotalSec = 52 MiB / 1,040,000 ≈ 52.42s -> 52s
+    const coldStartDur = CoreManager.calculateSafeDuration();
+    assert.strictEqual(coldStartDur, 52, `Cold-start safeDuration must respect SAFE_BYTE_LIMIT (52s), got ${coldStartDur}`);
+    CONFIG.SAFE_BYTE_LIMIT = origSafeLimit;
+
+    // Subtest 28.2: Remaining video time clamping in getStats()
+    mockVideo.currentTime = 292;
+    mockVideo.duration = 300; // Only 8s remaining
+    mockVideo.buffered._setRanges([[292, 295]]);
+    const eosStats = CoreManager.getStats();
+    assert.strictEqual(eosStats.time.target, 8, `getStats().time.target should clamp to remaining video duration (8s), got ${eosStats.time.target}`);
+
+    mockVideo.currentTime = 0;
+    mockVideo.duration = 300;
+    console.log('✓ Cold-Start SAFE_BYTE_LIMIT Respect & Remaining Time Clamping passed.');
+}
+
+// Test 29: MediaSource Switch + trackBufferHealth Reset Coordination & Hi-Res Low-Buffer Preservation (Issue 1.7)
+{
+    console.log('\n[Test 29] Testing MediaSource Switch + trackBufferHealth Reset Coordination & Hi-Res Preservation (Issue 1.7)...');
+    ChunkTracker.reset();
+
+    // Establish initial MediaSource & video source in trackBufferHealth (no manual _lastSyncedResetCount hack)
+    const msOld = new MockMediaSource();
+    msOld.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    CoreManager.trackBufferHealth(10, 0, 'https://test.bilibili.com/video_old.mp4', false);
+    ChunkTracker.recordChunk('video', 0, 10, 5 * 1024 * 1024);
+
+    // Direction A: Player creates a new MediaSource and appends initial segment BEFORE video.currentSrc updates
+    const msNew = new MockMediaSource();
+    msNew.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'New MediaSource must reset previous video ledger');
+    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024);
+
+    // Now trackBufferHealth sees the updated video.currentSrc -> must NOT double-reset and wipe the 10 MB segment!
+    CoreManager.trackBufferHealth(10, 0, 'https://test.bilibili.com/video_new.mp4', false);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024, 'trackBufferHealth must not double-reset ledger after MediaSource switch already reset it');
+
+    // Direction B: trackBufferHealth detects video switch BEFORE ms3.addSourceBuffer runs, followed by another switch
+    CoreManager.trackBufferHealth(0, 0, 'https://test.bilibili.com/video_third.mp4', false);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'trackBufferHealth must reset ledger when it runs before new MediaSource');
+    const msThird = new MockMediaSource();
+    msThird.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    ChunkTracker.recordChunk('video', 0, 8, 8 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 8 * 1024 * 1024, 'Delayed addSourceBuffer must not double-reset or set stale _pendingMediaSourceReset');
+    CoreManager.trackBufferHealth(0, 0, 'https://test.bilibili.com/video_fourth.mp4', false);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Subsequent video switch after Direction B must still reset ledger');
+
+    // 3. Test Hi-Res native low-buffer preservation (e.g. player native default is 15s, unlocker hasn't touched it)
+    const origPlayer = mockWindow.player;
+    let hiResBufferTime = 15;
+    mockWindow.player = {
+        __core: () => ({
+            state: {
+                mediaInfo: {
+                    videoDataRate: 8000000,
+                    audioDataRate: 1500000,
+                    audioCodec: 'flac'
+                }
+            },
+            setStableBufferTime(t) { hiResBufferTime = t; },
+            getStableBufferTime() { return hiResBufferTime; }
+        })
+    };
+    CoreManager._lastAppliedTarget = null;
+    CoreManager._hiResLogged = false;
+    CoreManager.applyOptimization();
+    assert.strictEqual(hiResBufferTime, 15, 'Hi-Res should preserve native low buffer setting (15s) when not previously expanded');
+
+    // When previously expanded (e.g. 120s), Hi-Res should reset it back to 20s
+    hiResBufferTime = 120;
+    CoreManager._lastAppliedTarget = 120;
+    CoreManager.applyOptimization();
+    assert.strictEqual(hiResBufferTime, 20, 'Hi-Res should reset previously expanded buffer (120s) to 20s');
+
+    mockWindow.player = origPlayer;
+    mockVideo.currentSrc = 'https://test.bilibili.com/video.mp4';
+    console.log('✓ MediaSource Switch + trackBufferHealth Reset Coordination & Hi-Res Preservation passed.');
+}
+
+// Test 30: Detached Badge Re-Creation, Duplicate Stats Panel Cleanup & Hysteresis Deadband (Issue 1.8)
+{
+    console.log('\n[Test 30] Testing Detached Badge Re-Creation, Duplicate Stats Panel Cleanup & Hysteresis (Issue 1.8)...');
+    ChunkTracker.reset();
+    mockVideo.currentTime = 10;
+    mockVideo.buffered._setRanges([[0, 40]]);
+    ChunkTracker.recordChunk('video', 10, 40, 30 * 1024 * 1024);
+
+    const stats = CoreManager.getStats();
+    UIManager.updateControlBarBadge(stats);
+    const firstBadge = UIManager.badgeRef;
+    assert(firstBadge !== null, 'Badge should exist');
+
+    // Simulate Bilibili rebuilding the control bar DOM and detaching the existing badge from mockCtrlBottomLeft
+    mockCtrlBadges = [];
+    assert.strictEqual(mockCtrlBottomLeft.contains(firstBadge), false, 'firstBadge should no longer be contained in control bar');
+
+    UIManager.updateControlBarBadge(stats);
+    assert(UIManager.badgeRef !== null, 'Badge should be re-created');
+    assert.notStrictEqual(UIManager.badgeRef, firstBadge, 'Detached badge should be replaced by a fresh badge element');
+    assert.strictEqual(mockCtrlBottomLeft.contains(UIManager.badgeRef), true, 'New badge should be mounted inside control bar');
+
+    // Simulate duplicate #my-buffer-overlay panels inside mockInfoContainer
+    const extraPanel = mockDocument.createElement('div');
+    extraPanel.id = 'my-buffer-overlay';
+    mockInfoContainer.appendChild(extraPanel);
+    assert(mockInfoPanels.length >= 2, 'Should have duplicate panels before updateStatsPanel');
+
+    UIManager.updateStatsPanel(stats);
+    assert.strictEqual(mockInfoPanels.length, 1, 'updateStatsPanel must remove duplicate #my-buffer-overlay panels');
+
+    // Verify applyOptimization hysteresis deadband (29s <-> 30s), external player reset recovery (24s -> 20s -> 24s), and urgent downward throttle
+    const origCalcSafe = CoreManager.calculateSafeDuration;
+    const origPlayer = mockWindow.player;
+    let appliedTarget = 20;
+    let setCalls = 0;
+    let nextTarget = 30;
+    mockWindow.player = {
+        __core: () => ({
+            state: { mediaInfo: { videoDataRate: 8000000, audioDataRate: 320000 } },
+            setStableBufferTime(t) { appliedTarget = t; setCalls++; },
+            getStableBufferTime() { return appliedTarget; }
+        })
+    };
+    CoreManager.calculateSafeDuration = () => nextTarget;
+    CoreManager._lastAppliedTarget = null;
+    CoreManager._videoThrottled = false;
+
+    // 1. Initial apply (20s -> 30s)
+    CoreManager.applyOptimization();
+    assert.strictEqual(appliedTarget, 30, 'Initial applyOptimization should set 30s');
+    assert.strictEqual(setCalls, 1);
+
+    // 2. Minor fluctuation within HYSTERESIS_DELTA (30s -> 29s, delta = 1 < 5) must NOT trigger setStableBufferTime
+    nextTarget = 29;
+    CoreManager.applyOptimization();
+    assert.strictEqual(appliedTarget, 30, 'Hysteresis deadband must suppress 30s -> 29s oscillation');
+    assert.strictEqual(setCalls, 1, 'setStableBufferTime must not be called within hysteresis deadband');
+
+    // 3. Urgent downward throttle when _videoThrottled is true (30s -> 27s, delta = 3 < 5) MUST update immediately
+    nextTarget = 27;
+    CoreManager._videoThrottled = true;
+    CoreManager.applyOptimization();
+    assert.strictEqual(appliedTarget, 27, 'Urgent downward throttle must bypass hysteresis deadband');
+    assert.strictEqual(setCalls, 2);
+    CoreManager._videoThrottled = false;
+
+    // 4. External player reset (player resets buffer time back to 20s while target is 24s, delta = 4 < 5) MUST re-apply 24s
+    nextTarget = 24;
+    CoreManager._lastAppliedTarget = 24;
+    appliedTarget = 20; // External reset by Bilibili player
+    CoreManager.applyOptimization();
+    assert.strictEqual(appliedTarget, 24, 'External player reset to 20s must be overwritten back to 24s even when |20-24| < 5');
+    assert.strictEqual(setCalls, 3);
+
+    CoreManager.calculateSafeDuration = origCalcSafe;
+    mockWindow.player = origPlayer;
+
+    console.log('✓ Detached Badge Re-Creation, Duplicate Stats Panel Cleanup & Hysteresis passed.');
+}
+
 // Test 8: End-to-end MSE Hook interception
 async function testMSEHooks() {
     console.log('\n[Test 8] Testing live MSE hook execution with MockMediaSource...');
@@ -1120,11 +1507,14 @@ async function testMSEHooks() {
 }
 
 testMSEHooks().then(() => {
+    for (const t of activeTimers) {
+        clearInterval(t);
+        clearTimeout(t);
+    }
     console.log('\n========================================');
-    console.log('🎉 ALL 22 UNIT & EDGE CASE TESTS PASSED!');
+    console.log('🎉 ALL 30 UNIT & EDGE CASE TESTS PASSED!');
     console.log('========================================');
-    process.exit(0);
 }).catch(err => {
     console.error('Test failed:', err);
-    process.exit(1);
+    process.exitCode = 1;
 });
