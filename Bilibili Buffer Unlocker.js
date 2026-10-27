@@ -3,7 +3,7 @@
 // @name:zh      B站缓冲解限
 // @name:en      Bilibili Buffer Unlocker
 // @namespace    https://github.com/liweichen6/Bilibili-Buffer-Unlocker
-// @version      3.4
+// @version      3.5
 // @description  Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI. 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:zh 解限B站播放器缓冲时长，智能防止内存溢出，播放器统计信息UI集成
 // @description:en Increase Bilibili player video buffer duration, intelligently prevent memory overflow, and integrate with player statistics UI
@@ -39,7 +39,7 @@
     const win = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
     const Utils = {
-        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.4',
+        version: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) ? GM_info.script.version : '3.5',
 
         formatTime: (s) => {
             if (!Number.isFinite(s) || s < 0) return '0s';
@@ -120,8 +120,6 @@
         _seq: 0,
         _activeMediaSource: null,
         _generation: 0,
-        _resetCount: 0,
-        _pendingMediaSourceReset: false,
 
         // 便捷只读属性：获取当前总活跃/前向/回退物理内存
         get totalVideoBytes() {
@@ -217,7 +215,19 @@
                 const minBeforeStart = mergedBefore[0].start;
                 const maxBeforeEnd = mergedBefore[mergedBefore.length - 1].end;
 
-                // 计算 a 相对于 mergedBefore 新增的所有未覆盖子区间（左扩、中间桥接空隙、右扩）
+                // 两侧同时扩展：单个连续媒体段必然跨越中间已有区间，MSE 编码帧处理会覆盖替换其中旧帧，按整段记录以修剪被覆盖的旧分片
+                if (a.start < minBeforeStart - 0.05 && a.end > maxBeforeEnd + 0.05) {
+                    const dur = a.end - a.start;
+                    return {
+                        start: a.start,
+                        end: a.end,
+                        duration: dur,
+                        uncoveredDuration: dur,
+                        segments: [{ start: a.start, end: a.end, duration: dur }]
+                    };
+                }
+
+                // 计算 a 相对于 mergedBefore 新增的所有未覆盖子区间（单侧扩展、中间桥接空隙）
                 const segments = [];
                 if (a.start < minBeforeStart - 0.05) {
                     const end = Math.min(a.end, minBeforeStart);
@@ -282,7 +292,8 @@
                             duration: dur1,
                             bytes: b1,
                             timestamp: c.timestamp,
-                            seq: c.seq
+                            seq: c.seq,
+                            source: c.source
                         });
                     }
                     if (dur2 > 0.01 && b2 > 0) {
@@ -293,7 +304,8 @@
                             duration: dur2,
                             bytes: b2,
                             timestamp: c.timestamp,
-                            seq: c.seq
+                            seq: c.seq,
+                            source: c.source
                         });
                     }
                 } else if (c.start < removeStart && c.end <= removeEnd) {
@@ -307,7 +319,8 @@
                             duration: dur,
                             bytes: b,
                             timestamp: c.timestamp,
-                            seq: c.seq
+                            seq: c.seq,
+                            source: c.source
                         });
                     }
                 } else if (c.start >= removeStart && c.end > removeEnd) {
@@ -321,7 +334,8 @@
                             duration: dur,
                             bytes: b,
                             timestamp: c.timestamp,
-                            seq: c.seq
+                            seq: c.seq,
+                            source: c.source
                         });
                     }
                 }
@@ -331,7 +345,7 @@
         },
 
         // 记录新分片
-        recordChunk: (track, start, end, bytes) => {
+        recordChunk: (track, start, end, bytes, source = null) => {
             const duration = end - start;
             if (duration <= 0.02 || bytes <= 0 || !Number.isFinite(start) || !Number.isFinite(end)) return;
 
@@ -346,7 +360,8 @@
                 bytes,
                 duration,
                 timestamp: Date.now(),
-                seq: ++ChunkTracker._seq
+                seq: ++ChunkTracker._seq,
+                source
             });
 
             ledger.sort((a, b) => a.start - b.start);
@@ -617,13 +632,45 @@
             ChunkTracker.audioLedger.length = 0;
             ChunkTracker._seq = 0;
             ChunkTracker._generation++;
-            ChunkTracker._resetCount++;
-            ChunkTracker._pendingMediaSourceReset = false;
             if (typeof CoreManager !== 'undefined' && CoreManager) {
                 CoreManager._videoThrottled = false;
                 CoreManager._audioThrottled = false;
                 CoreManager._totalThrottled = false;
             }
+        },
+
+        // 判断某个 MediaSource 是否挂载在当前受调控的主 <video> 上（悬停预览/广告等并发 MediaSource 不计入账本）
+        isTrackedSource: (ms) => {
+            if (!ms) return true;
+            const video = typeof document !== 'undefined' ? document.querySelector('video') : null;
+            const src = video ? (video.currentSrc || video.src || '') : '';
+            if (ms.__objectURL && src) return ms.__objectURL === src;
+            // 无法通过 blob 地址比对时（过渡期空地址等），仅在尚无活跃流或旧流已关闭时接受新流
+            const active = ChunkTracker._activeMediaSource;
+            return !active || active === ms || active.readyState === 'closed';
+        },
+
+        // 认领账本归属：MediaSource 首次被确认为主播放流时切换归属并重置账本
+        claimSource: (ms) => {
+            if (!ChunkTracker.isTrackedSource(ms)) return false;
+            if (!ms || ms === ChunkTracker._activeMediaSource) return true;
+            const hadPrevious = ChunkTracker._activeMediaSource !== null;
+            ChunkTracker.reset();
+            ChunkTracker._activeMediaSource = ms;
+            if (hadPrevious) {
+                CoreManager._lastAppliedTarget = null;
+                CoreManager._hiResLogged = false;
+            }
+            return true;
+        },
+
+        // 剔除某个已被 removeSourceBuffer 卸载的 SourceBuffer 记录的全部分片
+        dropSource: (sb) => {
+            [ChunkTracker.videoLedger, ChunkTracker.audioLedger].forEach(ledger => {
+                const next = ledger.filter(c => c.source !== sb);
+                ledger.length = 0;
+                ledger.push(...next);
+            });
         },
 
         // 初始化拦截钩子
@@ -648,7 +695,14 @@
 
                         const onUpdateEnd = () => {
                             try {
-                                if (genAtAppend !== ChunkTracker._generation || sb.__detached || sb.__mediaSource?.__detached) return;
+                                if (sb.__detached) return;
+                                const ms = sb.__mediaSource;
+                                if (genAtAppend !== ChunkTracker._generation) {
+                                    // 追加期间账本已被重置：仅当本缓冲区仍属于当前主播放流时继续记录
+                                    if (ms !== ChunkTracker._activeMediaSource || !ChunkTracker.isTrackedSource(ms)) return;
+                                } else if (!ChunkTracker.claimSource(ms)) {
+                                    return;
+                                }
                                 const rangesAfter = ChunkTracker.snapshotRanges(sb.buffered);
                                 const diff = ChunkTracker.diffRanges(rangesBefore, rangesAfter);
                                 if (diff && diff.duration > 0.02) {
@@ -656,7 +710,7 @@
                                         ? diff.segments
                                         : [{ start: diff.start, end: diff.end, duration: diff.duration }];
                                     if (segs.length === 1) {
-                                        ChunkTracker.recordChunk(track, segs[0].start, segs[0].end, byteLength);
+                                        ChunkTracker.recordChunk(track, segs[0].start, segs[0].end, byteLength, sb);
                                     } else {
                                         const totalSegDur = diff.uncoveredDuration || segs.reduce((sum, s) => sum + s.duration, 0);
                                         let remainingBytes = byteLength;
@@ -666,7 +720,7 @@
                                                 ? remainingBytes
                                                 : Math.max(1, Math.round(byteLength * (s.duration / totalSegDur)));
                                             remainingBytes = Math.max(0, remainingBytes - segBytes);
-                                            ChunkTracker.recordChunk(track, s.start, s.end, segBytes);
+                                            ChunkTracker.recordChunk(track, s.start, s.end, segBytes, sb);
                                         }
                                     }
                                 }
@@ -688,7 +742,8 @@
                             // 先行调用底层原生 remove，若抛出异常（如 InvalidAccessError / InvalidStateError）则不污染账本
                             const ret = origRemove.apply(this, arguments);
                             try {
-                                if (!this.__detached && !this.__mediaSource?.__detached) {
+                                const ms = this.__mediaSource;
+                                if (!this.__detached && (!ms || ms === ChunkTracker._activeMediaSource)) {
                                     const track = this.__trackType || 'video';
                                     ChunkTracker.onRemove(track, Number(start), Number(end));
                                 }
@@ -706,22 +761,13 @@
                         MS.prototype.addSourceBuffer = function (mimeType) {
                             const sb = origAddSourceBuffer.apply(this, arguments);
                             try {
-                                if (ChunkTracker._activeMediaSource && ChunkTracker._activeMediaSource !== this) {
-                                    ChunkTracker._activeMediaSource.__detached = true;
-                                    ChunkTracker.reset();
-                                    ChunkTracker._pendingMediaSourceReset = true;
-                                    if (typeof CoreManager !== 'undefined' && CoreManager) {
-                                        CoreManager._lastAppliedTarget = null;
-                                        CoreManager._hiResLogged = false;
-                                    }
-                                }
-                                ChunkTracker._activeMediaSource = this;
-                                this.__detached = false;
                                 sb.__mediaSource = this;
                                 sb.__detached = false;
                                 const lower = String(mimeType || '').toLowerCase();
                                 sb.__trackType = lower.includes('video') ? 'video' : (lower.includes('audio') ? 'audio' : 'unknown');
                                 hookSourceBufferProto(sb.constructor?.prototype || targetWin.SourceBuffer?.prototype);
+                                // 仅当该 MediaSource 挂载在主 <video> 上时才认领账本，并发预览/广告流不会打断主流追踪
+                                ChunkTracker.claimSource(this);
                             } catch {}
                             return sb;
                         };
@@ -735,11 +781,29 @@
                             try {
                                 if (sb && typeof sb === 'object') {
                                     sb.__detached = true;
+                                    // 卸载的缓冲区不再计入任何活跃配额，同步剔除其账本分片（如 B 站后台纯音频模式卸载视频轨）
+                                    ChunkTracker.dropSource(sb);
                                 }
                             } catch {}
                             return ret;
                         };
                         MS.prototype.removeSourceBuffer.__hooked = true;
+                    }
+
+                    // 记录 MediaSource 对应的 blob 地址，用于判定其是否挂载在主 <video> 上
+                    const URLCtor = targetWin.URL;
+                    if (URLCtor && typeof URLCtor.createObjectURL === 'function' && !URLCtor.createObjectURL.__hooked) {
+                        const origCreateObjectURL = URLCtor.createObjectURL;
+                        URLCtor.createObjectURL = function (obj) {
+                            const url = origCreateObjectURL.apply(this, arguments);
+                            try {
+                                if (obj && typeof obj.addSourceBuffer === 'function') {
+                                    obj.__objectURL = url;
+                                }
+                            } catch {}
+                            return url;
+                        };
+                        URLCtor.createObjectURL.__hooked = true;
                     }
 
                     if (targetWin.SourceBuffer && targetWin.SourceBuffer.prototype) {
@@ -759,7 +823,7 @@
         _lastVideoSrc: '',
         _lastAppliedTarget: null,
         _hiResLogged: false,
-        _lastSyncedResetCount: 0,
+        _lastWrittenTarget: null,
         _videoThrottled: false,
         _audioThrottled: false,
         _totalThrottled: false,
@@ -1031,20 +1095,25 @@
                 const core = CoreManager.getCore();
                 if (!core) return;
 
-                // Hi-Res 音频遵循 B 站内置策略，仅在已处于扩容高位 (>30s) 或曾被脚本改写时主动重置，避免覆盖播放器原生低位策略 (如 15s/25s)
+                // Hi-Res 音频遵循 B 站内置策略，仅在已处于扩容高位 (>30s) 或当前值由脚本写入时主动重置，避免覆盖播放器原生低位策略 (如 15s/25s)
                 if (CoreManager.isHiRes()) {
+                    const currentSetting = typeof core.getStableBufferTime === 'function' ? core.getStableBufferTime() : null;
+                    const hasCurrent = Number.isFinite(currentSetting);
                     if (typeof core.setStableBufferTime === 'function') {
-                        const currentSetting = typeof core.getStableBufferTime === 'function' ? core.getStableBufferTime() : null;
                         const prevApplied = CoreManager._lastAppliedTarget;
-                        const needsReset = (Number.isFinite(currentSetting) && currentSetting > 30) ||
+                        // _lastAppliedTarget 会在播放/换源事件中清空，改用不随事件清空的 _lastWrittenTarget 判断当前值是否出自脚本
+                        const isScriptWritten = hasCurrent && currentSetting === CoreManager._lastWrittenTarget;
+                        const needsReset = (hasCurrent && currentSetting > 30) ||
+                                           (isScriptWritten && currentSetting !== 20) ||
                                            (prevApplied !== null && prevApplied !== 20);
 
                         if (needsReset) {
-                            const fromText = Number.isFinite(currentSetting)
+                            const fromText = hasCurrent
                                 ? `${currentSetting}s`
                                 : (prevApplied ? `${prevApplied}s` : '自定义配置');
                             core.setStableBufferTime(20);
                             CoreManager._lastAppliedTarget = 20;
+                            CoreManager._lastWrittenTarget = 20;
                             if (!CoreManager._hiResLogged) {
                                 console.log(`[缓冲解限] 🎵 检测到 Hi-Res/杜比音质，缓冲从 ${fromText} 重置为默认策略 (20s)`);
                                 CoreManager._hiResLogged = true;
@@ -1053,7 +1122,7 @@
                         }
                     }
                     if (!CoreManager._hiResLogged) {
-                        console.log('[缓冲解限] 🎵 检测到 Hi-Res/杜比音质，保持播放器默认策略 (20s)');
+                        console.log(`[缓冲解限] 🎵 检测到 Hi-Res/杜比音质，保持播放器原生策略 (${hasCurrent ? `${currentSetting}s` : '默认'})`);
                         CoreManager._hiResLogged = true;
                     }
                     return;
@@ -1085,6 +1154,7 @@
                     if (shouldUpdate) {
                         core.setStableBufferTime(targetSeconds);
                         CoreManager._lastAppliedTarget = targetSeconds;
+                        CoreManager._lastWrittenTarget = targetSeconds;
                         if (force) {
                             console.log(`[缓冲解限] ⚡ 手动重新应用解限策略: ${targetSeconds}s`);
                         }
@@ -1101,13 +1171,10 @@
                 if (currentVideoSrc && CoreManager._lastVideoSrc && CoreManager._lastVideoSrc !== currentVideoSrc) {
                     CoreManager._hiResLogged = false;
                     CoreManager._lastAppliedTarget = null;
-                    const alreadyReset = (ChunkTracker._resetCount !== CoreManager._lastSyncedResetCount) || ChunkTracker._pendingMediaSourceReset;
-                    ChunkTracker._pendingMediaSourceReset = false;
-                    if (!alreadyReset) {
-                        if (ChunkTracker._activeMediaSource) {
-                            ChunkTracker._activeMediaSource.__detached = true;
-                            ChunkTracker._activeMediaSource = null;
-                        }
+                    // 新地址对应的 MediaSource 已在 addSourceBuffer 时认领账本（已重置）则无需重复清空，否则释放归属等待新流认领
+                    const active = ChunkTracker._activeMediaSource;
+                    if (!active || active.__objectURL !== currentVideoSrc) {
+                        ChunkTracker._activeMediaSource = null;
                         ChunkTracker.reset();
                     }
                 }
@@ -1124,8 +1191,6 @@
                 CoreManager._lastCurrentTime = currentTime;
                 if (currentVideoSrc) {
                     CoreManager._lastVideoSrc = currentVideoSrc;
-                    CoreManager._lastSyncedResetCount = ChunkTracker._resetCount;
-                    ChunkTracker._pendingMediaSourceReset = false;
                 }
             } catch {}
         },

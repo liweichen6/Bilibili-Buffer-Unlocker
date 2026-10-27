@@ -1,10 +1,10 @@
-// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.4
+// test_unit.js - Automated unit tests for Bilibili Buffer Unlocker v3.5
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-console.log('--- Running Automated Unit Tests for v3.4 ---');
+console.log('--- Running Automated Unit Tests for v3.5 ---');
 
 // Setup mock browser environment
 class MockTimeRanges {
@@ -86,6 +86,7 @@ class MockMediaSource extends MockEventTarget {
     constructor() {
         super();
         this.sourceBuffers = [];
+        this.readyState = 'open';
     }
     addSourceBuffer(mimeType) {
         const sb = new MockSourceBuffer();
@@ -231,6 +232,10 @@ const mockWindow = {
     setTimeout: (fn, ms) => trackTimer(fn, Math.max(ms || 0, 100000)),
     clearInterval: (id) => clearTimeout(id),
     clearTimeout: (id) => clearTimeout(id),
+    URL: {
+        _seq: 0,
+        createObjectURL(obj) { return `blob:https://www.bilibili.com/mock-${++this._seq}`; }
+    },
     console: console,
     player: {
         __core: () => ({
@@ -260,6 +265,25 @@ const unlocker = mockWindow.__BiliBufferUnlocker;
 assert(unlocker, 'Unlocker module should be exposed on window.__BiliBufferUnlocker');
 
 const { ChunkTracker, CoreManager, UIManager, CONFIG, Utils } = unlocker;
+
+// Create a MediaSource attached to the main <video> the way players do (createObjectURL -> video.src -> sourceopen)
+function attachMediaSource() {
+    const ms = new MockMediaSource();
+    mockVideo.currentSrc = mockWindow.URL.createObjectURL(ms);
+    return ms;
+}
+
+// Drive the hooked appendBuffer synchronously: set the post-append buffered ranges and fire updateend
+function appendSync(sb, ranges, bytes) {
+    sb._onNextUpdate = () => sb.buffered._setRanges(ranges);
+    sb.appendBuffer({ byteLength: bytes });
+    clearTimeout(sb._lastTimer);
+    sb._lastTimer = null;
+    sb._onNextUpdate();
+    sb._onNextUpdate = null;
+    sb.updating = false;
+    sb.dispatchEvent('updateend');
+}
 
 console.log('✓ Script evaluated successfully, exposed modules verified.');
 
@@ -611,21 +635,24 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     assert.strictEqual(dBoth.start, 8, 'Start should expand to 8');
     assert.strictEqual(dBoth.end, 14, 'End should expand to 14');
     assert.strictEqual(dBoth.duration, 6, 'Duration should be 6');
-    assert.strictEqual(dBoth.uncoveredDuration, 4, 'Uncovered duration should be 4s ([8,10] + [12,14])');
-    assert.strictEqual(dBoth.segments.length, 2, 'Bidirectional expansion should return only the 2 uncovered boundary segments');
+    assert.strictEqual(dBoth.segments.length, 1, 'A contiguous segment spanning the island is recorded as one whole span');
 
-    // Verify bidirectional expansion on an existing 100 MB range [10, 110] -> [9, 111] (+2 MB) does NOT prune the 100 MB middle
+    // Through the real hook: a 6 MB segment spanning the [10,12] island overwrites it (MSE coded frame replacement)
     ChunkTracker.reset();
-    ChunkTracker.recordChunk('video', 10, 110, 100 * 1024 * 1024);
-    const dLong = ChunkTracker.diffRanges([{ start: 10, end: 110 }], [{ start: 9, end: 111 }]);
-    let remBytes = 2 * 1024 * 1024;
-    for (let k = 0; k < dLong.segments.length; k++) {
-        const s = dLong.segments[k];
-        const b = (k === dLong.segments.length - 1) ? remBytes : Math.round(2 * 1024 * 1024 * (s.duration / dLong.uncoveredDuration));
-        remBytes -= b;
-        ChunkTracker.recordChunk('video', s.start, s.end, b);
-    }
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 102 * 1024 * 1024, 'Bidirectional boundary expansion must preserve existing 100 MB middle chunk');
+    const ms = attachMediaSource();
+    const vSb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    appendSync(vSb, [[10, 12]], 2 * 1024 * 1024);
+    appendSync(vSb, [[8, 14]], 6 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 6 * 1024 * 1024, 'Overwritten island must be pruned, not double-counted');
+    assert.strictEqual(JSON.stringify(ChunkTracker.videoLedger.map(c => [c.start, c.end])), '[[8,14]]');
+
+    // Two islands inside one 22 MB segment [3,25] -> only the new segment remains
+    ChunkTracker.reset();
+    vSb.buffered._setRanges([]);
+    appendSync(vSb, [[5, 10]], 5 * 1024 * 1024);
+    appendSync(vSb, [[5, 10], [15, 20]], 5 * 1024 * 1024);
+    appendSync(vSb, [[3, 25]], 22 * 1024 * 1024);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 22 * 1024 * 1024, 'Both overwritten islands must be pruned');
     console.log('✓ Bidirectional range expansion passed.');
 }
 
@@ -1145,36 +1172,46 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
 {
     console.log('\n[Test 23] Testing Multi-MediaSource Isolation & Detached SourceBuffer Protection (Issue 1.1)...');
     ChunkTracker.reset();
+    const MB = 1024 * 1024;
 
-    const ms1 = new MockMediaSource();
+    const ms1 = attachMediaSource();
     const vSb1 = ms1.addSourceBuffer('video/mp4; codecs="avc1.640028"');
     const aSb1 = ms1.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+    assert.strictEqual(ChunkTracker._activeMediaSource, ms1, 'ms1 (attached to the main <video>) should own the ledger');
 
-    assert.strictEqual(ChunkTracker._activeMediaSource, ms1, 'ms1 should be active MediaSource');
-    assert.strictEqual(vSb1.__detached, false);
-    assert.strictEqual(aSb1.__detached, false);
+    appendSync(vSb1, [[0, 30]], 15 * MB);
+    appendSync(aSb1, [[0, 30]], 1 * MB);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * MB);
 
-    ChunkTracker.recordChunk('video', 0, 30, 15 * 1024 * 1024);
-    ChunkTracker.recordChunk('audio', 0, 30, 1 * 1024 * 1024);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * 1024 * 1024);
+    // A hover-preview player creates its own MediaSource on another <video>: it must neither reset nor blind the main ledger
+    const msPreview = new MockMediaSource();
+    mockWindow.URL.createObjectURL(msPreview);
+    const pSb = msPreview.addSourceBuffer('video/mp4; codecs="av01.0.08M.08"');
+    appendSync(pSb, [[0, 5]], 2 * MB);
+    assert.strictEqual(ChunkTracker._activeMediaSource, ms1, 'Preview MediaSource must not take over the ledger');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * MB, 'Preview chunks must not enter the main ledger');
+    appendSync(vSb1, [[0, 40]], 5 * MB);
+    vSb1.remove(0, 10);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * MB, 'Main stream appends/removes must still be tracked after a preview appears (15 + 5 - 5)');
+    msPreview.removeSourceBuffer(pSb);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 15 * MB, 'Removing the preview buffer must not touch main chunks');
 
-    // Detach aSb1 via removeSourceBuffer; subsequent remove() on aSb1 must NOT prune active audio ledger
-    ms1.removeSourceBuffer(aSb1);
-    assert.strictEqual(aSb1.__detached, true, 'Removed SourceBuffer must be marked __detached');
-    aSb1.remove(0, 30);
-    assert.strictEqual(ChunkTracker.totalAudioBytes, 1 * 1024 * 1024, 'Detached SourceBuffer.remove() must not prune active audio ledger');
+    // removeSourceBuffer (e.g. background audio-only mode dropping the video track) must drop that buffer's chunks
+    ms1.removeSourceBuffer(vSb1);
+    assert.strictEqual(vSb1.__detached, true, 'Removed SourceBuffer must be marked __detached');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Chunks of a removed SourceBuffer must leave the ledger');
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 1 * MB, 'Other buffers of the same MediaSource keep their chunks');
 
-    // Creating a new MediaSource and adding a SourceBuffer detaches ms1 and resets the ledger for the new stream
-    const ms2 = new MockMediaSource();
+    // The main <video> switches to a new MediaSource: it takes over and late callbacks from ms1 are ignored
+    const ms2 = attachMediaSource();
     const vSb2 = ms2.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-    assert.strictEqual(ms1.__detached, true, 'Old MediaSource ms1 should be marked __detached');
-    assert.strictEqual(ChunkTracker._activeMediaSource, ms2, 'ms2 should now be active MediaSource');
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Switching active MediaSource should reset video ledger');
-
-    // Record chunk on new MediaSource ms2, then verify stale vSb1.remove() from ms1 is ignored
-    ChunkTracker.recordChunk('video', 0, 20, 10 * 1024 * 1024);
-    vSb1.remove(0, 20);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024, 'Stale SourceBuffer from detached MediaSource must not affect new ledger');
+    assert.strictEqual(ChunkTracker._activeMediaSource, ms2, 'ms2 should now own the ledger');
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 0, 'Switching the main MediaSource should reset the ledger');
+    appendSync(vSb2, [[0, 20]], 10 * MB);
+    aSb1.remove(0, 20);
+    appendSync(aSb1, [[0, 40]], 1 * MB);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * MB, 'Old MediaSource must not affect the new ledger');
+    assert.strictEqual(ChunkTracker.totalAudioBytes, 0, 'Old MediaSource appends must not be recorded');
 
     console.log('✓ Multi-MediaSource Isolation & Detached SourceBuffer Protection passed.');
 }
@@ -1214,9 +1251,9 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     console.log('\n[Test 25] Testing Exception-Safe remove() & appendBuffer() Hooks (Issue 1.3)...');
     ChunkTracker.reset();
 
-    const ms = new MockMediaSource();
+    const ms = attachMediaSource();
     const vSb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-    ChunkTracker.recordChunk('video', 0, 30, 30 * 1024 * 1024);
+    appendSync(vSb, [[0, 30]], 30 * 1024 * 1024);
 
     // Simulate native remove() throwing InvalidAccessError: ledger must NOT be pruned
     vSb._throwOnNextRemove = true;
@@ -1323,33 +1360,58 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
 {
     console.log('\n[Test 29] Testing MediaSource Switch + trackBufferHealth Reset Coordination & Hi-Res Preservation (Issue 1.7)...');
     ChunkTracker.reset();
+    const MB = 1024 * 1024;
+    const tick = () => CoreManager.trackBufferHealth(10, 0, mockVideo.currentSrc, false);
 
-    // Establish initial MediaSource & video source in trackBufferHealth (no manual _lastSyncedResetCount hack)
-    const msOld = new MockMediaSource();
-    msOld.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-    CoreManager.trackBufferHealth(10, 0, 'https://test.bilibili.com/video_old.mp4', false);
-    ChunkTracker.recordChunk('video', 0, 10, 5 * 1024 * 1024);
+    // Initial stream on the main <video>
+    const msOld = attachMediaSource();
+    const sbOld = msOld.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    tick();
+    appendSync(sbOld, [[0, 10]], 5 * MB);
 
-    // Direction A: Player creates a new MediaSource and appends initial segment BEFORE video.currentSrc updates
-    const msNew = new MockMediaSource();
-    msNew.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'New MediaSource must reset previous video ledger');
-    ChunkTracker.recordChunk('video', 0, 10, 10 * 1024 * 1024);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024);
+    // Same-element switch (real browser order): src -> addSourceBuffer -> appends -> UI tick sees the new src
+    const msNew = attachMediaSource();
+    const sbNew = msNew.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'New main MediaSource must reset previous video ledger');
+    appendSync(sbNew, [[0, 10]], 10 * MB);
+    tick();
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * MB, 'trackBufferHealth must not double-reset after the new MediaSource took over');
 
-    // Now trackBufferHealth sees the updated video.currentSrc -> must NOT double-reset and wipe the 10 MB segment!
-    CoreManager.trackBufferHealth(10, 0, 'https://test.bilibili.com/video_new.mp4', false);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 10 * 1024 * 1024, 'trackBufferHealth must not double-reset ledger after MediaSource switch already reset it');
-
-    // Direction B: trackBufferHealth detects video switch BEFORE ms3.addSourceBuffer runs, followed by another switch
-    CoreManager.trackBufferHealth(0, 0, 'https://test.bilibili.com/video_third.mp4', false);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'trackBufferHealth must reset ledger when it runs before new MediaSource');
+    // Tick sees the new src before the new MediaSource opens -> single reset, then the new stream is tracked
     const msThird = new MockMediaSource();
-    msThird.addSourceBuffer('video/mp4; codecs="avc1.640028"');
-    ChunkTracker.recordChunk('video', 0, 8, 8 * 1024 * 1024);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 8 * 1024 * 1024, 'Delayed addSourceBuffer must not double-reset or set stale _pendingMediaSourceReset');
-    CoreManager.trackBufferHealth(0, 0, 'https://test.bilibili.com/video_fourth.mp4', false);
-    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Subsequent video switch after Direction B must still reset ledger');
+    mockVideo.currentSrc = mockWindow.URL.createObjectURL(msThird);
+    tick();
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'trackBufferHealth must reset ledger when it runs before the new MediaSource');
+    const sbThird = msThird.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    appendSync(sbThird, [[0, 8]], 8 * MB);
+    tick();
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 8 * MB, 'Delayed addSourceBuffer must be tracked without a second reset');
+
+    // Element swap: a new <video> is built while ticks still see the old src; once it becomes the main element
+    // the new MediaSource must be tracked (never left blind)
+    const msSwap = new MockMediaSource();
+    const swapUrl = mockWindow.URL.createObjectURL(msSwap);
+    const sbSwap = msSwap.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    appendSync(sbSwap, [[0, 4]], 4 * MB);
+    tick(); // still the old element
+    assert.strictEqual(ChunkTracker._activeMediaSource, msThird, 'Off-screen MediaSource must not take over while the old element is main');
+    mockVideo.currentSrc = swapUrl;
+    tick();
+    appendSync(sbSwap, [[0, 12]], 8 * MB);
+    appendSync(sbSwap, [[0, 20]], 8 * MB);
+    assert.strictEqual(ChunkTracker._activeMediaSource, msSwap, 'Swapped-in MediaSource must own the ledger');
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 16 * MB, 'Swapped-in stream must keep being tracked');
+
+    // MSE -> progressive mp4 -> MSE on the same element: the next MSE stream must stay tracked
+    mockVideo.currentSrc = 'https://upos-sz.bilivideo.com/episode.mp4';
+    tick();
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 0, 'Switching to a non-MSE source resets the ledger');
+    const msNext = attachMediaSource();
+    const sbNext = msNext.addSourceBuffer('video/mp4; codecs="avc1.640028"');
+    appendSync(sbNext, [[0, 10]], 6 * MB);
+    tick();
+    appendSync(sbNext, [[0, 20]], 6 * MB);
+    assert.strictEqual(ChunkTracker.totalVideoBytes, 12 * MB, 'MSE stream after a progressive source must be fully tracked');
 
     // 3. Test Hi-Res native low-buffer preservation (e.g. player native default is 15s, unlocker hasn't touched it)
     const origPlayer = mockWindow.player;
@@ -1377,6 +1439,28 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
     CoreManager._lastAppliedTarget = 120;
     CoreManager.applyOptimization();
     assert.strictEqual(hiResBufferTime, 20, 'Hi-Res should reset previously expanded buffer (120s) to 20s');
+
+    // A 21-30s target written by the script must be reset even after a play event cleared _lastAppliedTarget
+    const origCalcSafe = CoreManager.calculateSafeDuration;
+    const sharedCore = {
+        state: { mediaInfo: { videoDataRate: 40000000, audioDataRate: 320000, audioCodec: 'mp4a.40.2' } },
+        setStableBufferTime(t) { hiResBufferTime = t; },
+        getStableBufferTime() { return hiResBufferTime; }
+    };
+    mockWindow.player = { __core: () => sharedCore };
+    try {
+        CoreManager.calculateSafeDuration = () => 26;
+        CoreManager._lastAppliedTarget = null;
+        CoreManager.applyOptimization();
+        assert.strictEqual(hiResBufferTime, 26, 'Script should apply 26s for the high-bitrate AAC stream');
+        CoreManager._lastAppliedTarget = null; // onTrigger on play/ratechange
+        CoreManager._hiResLogged = false;
+        sharedCore.state.mediaInfo.audioCodec = 'flac';
+        CoreManager.applyOptimization();
+        assert.strictEqual(hiResBufferTime, 20, 'Hi-Res must reset a script-written 26s target to 20s');
+    } finally {
+        CoreManager.calculateSafeDuration = origCalcSafe;
+    }
 
     mockWindow.player = origPlayer;
     mockVideo.currentSrc = 'https://test.bilibili.com/video.mp4';
@@ -1468,7 +1552,7 @@ console.log('✓ Script evaluated successfully, exposed modules verified.');
 async function testMSEHooks() {
     console.log('\n[Test 8] Testing live MSE hook execution with MockMediaSource...');
     ChunkTracker.reset();
-    const ms = new MockMediaSource();
+    const ms = attachMediaSource();
     const videoSb = ms.addSourceBuffer('video/mp4; codecs="avc1.640028"');
     const audioSb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
 

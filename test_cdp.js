@@ -66,7 +66,7 @@ async function sleep(ms) {
 }
 
 async function runCDPTest() {
-    console.log('=== Starting Live CDP Verification for v3.4 ===');
+    console.log('=== Starting Live CDP Verification for v3.5 ===');
     const chromePath = resolveChromePath();
     const debugPort = await getFreePort();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chrome-bili-cdp-'));

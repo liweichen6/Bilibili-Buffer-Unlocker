@@ -2,7 +2,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-liweichen6%2FBilibili--Buffer--Unlocker-181717?logo=github)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![Forked from GreasyFork](https://img.shields.io/badge/Forked%20from-GreasyFork%20546615-orange?logo=greasyfork)](https://greasyfork.org/zh-CN/scripts/546615-bilibili-buffer-unlocker-b%E7%AB%99%E7%BC%93%E5%86%B2%E8%A7%A3%E9%99%90)
-[![Version](https://img.shields.io/badge/Release-v3.4-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
+[![Version](https://img.shields.io/badge/Release-v3.5-brightgreen)](https://github.com/liweichen6/Bilibili-Buffer-Unlocker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptCat-green)](#安装指南--installation)
 
@@ -328,6 +328,15 @@ const CONFIG = {
 
 ### 当前仓库持续演进版本 (Forked & Maintained by liweichen6)
 
+#### v3.5 (2026-10) - *v3.4 回归修复：主流归属判定、覆盖分片去重与 Hi-Res 重置*
+- **`MediaSource` 归属判定（修复账本"失明"）**：
+  - 拦截 `URL.createObjectURL` 记录每个 `MediaSource` 的 blob 地址，仅挂载在主 `<video>` 上的流才能认领账本（`_activeMediaSource`）。修复 v3.4 中悬停推荐视频产生的预览 `MediaSource` 会重置账本并永久屏蔽主流追踪、导致 90% 防爆熔断失效的问题；
+  - `addSourceBuffer` 与 `CoreManager.trackBufferHealth` 改为通过 blob 地址比对协同（移除 `_resetCount` / `_pendingMediaSourceReset` / `_lastSyncedResetCount` 握手）：新流认领时重置一次，已认领的新地址不再重复清空，任何时序下都不会把正在播放的流标记为失效。
+- **双向扩展覆盖分片去重**：单个连续媒体段两侧同时越过已有区间时恢复按整段记录，修剪被 MSE 编码帧覆盖替换的旧分片，修复 v3.4 的重复计数与误触熔断。
+- **`removeSourceBuffer` 账本清理**：账本分片记录所属 `SourceBuffer`，卸载时同步剔除（如 B 站后台纯音频模式卸载视频轨），避免残留字节锁死限流。
+- **Hi-Res 重置判定**：新增不随播放/换源事件清空的 `_lastWrittenTarget`，脚本写入的 21~30s 目标在切换至 Hi-Res / 杜比音质时仍会重置为 20s；保留原生策略时日志显示实际值。
+- **单元测试改为驱动真实 MSE 钩子**：Test 8 / 13 / 23 / 25 / 29 通过 blob 地址挂载的 Mock `MediaSource` 与真实 `appendBuffer` / `addSourceBuffer` / `removeSourceBuffer` / `remove` 钩子验证上述场景（预览流并存、元素替换、MSE → mp4 → MSE 换源、后台卸载视频轨）。
+
 #### v3.4 (2026-10) - *鲁棒性深度加固：多区间差集引擎、MediaSource 生命周期隔离与施密特防抖熔断*
 - **多区间精确差集与双向扩展字节分摊 (`diffRanges` & `onUpdateEnd`)**：
   - 重构 `ChunkTracker.diffRanges` 为完整的多段差集算法（`segments` + `uncoveredDuration`），单次 `appendBuffer` 跨空洞合并或双向扩展时仅提取真正新增的未覆盖子区间并按时长比例分摊 `byteLength`；
@@ -432,14 +441,14 @@ const CONFIG = {
 
 ## 安装指南 / Installation
 
-### 途径一：本仓库持续维护版（v3.4+ 推荐）
+### 途径一：本仓库持续维护版（v3.5+ 推荐）
 
 1. 安装浏览器脚本管理器扩展：
    - [Tampermonkey (篡改猴)](https://www.tampermonkey.net/)
    - [Violentmonkey (暴力猴)](https://violentmonkey.github.io/)
    - [ScriptCat (脚本猫)](https://scriptcat.org/)
 2. 点击下方链接一键安装最新重构版：
-   - **[安装 v3.4+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
+   - **[安装 v3.5+ 最新版 (GitHub Raw)](https://raw.githubusercontent.com/liweichen6/Bilibili-Buffer-Unlocker/main/Bilibili%20Buffer%20Unlocker.js)**
    - 或直接下载本仓库根目录的 [`Bilibili Buffer Unlocker.js`](./Bilibili%20Buffer%20Unlocker.js) 导入至脚本管理器。
 
 ### 途径二：Greasy Fork 原版（v2.2 基础归档）
